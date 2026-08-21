@@ -142,17 +142,46 @@ function gh(args, { allowFail = false } = {}) {
 }
 
 /**
- * `gh pr checks` exits NON-ZERO in two very different situations: no check has
+ * A network or GitHub-side hiccup is NOT a verdict. This loop polls for up to
+ * 90 minutes; treating one failed call as fatal means a momentary blip discards
+ * a PR that is perfectly healthy — which is exactly what happened on the first
+ * two real runs, both killed by `error connecting to api.github.com`.
+ */
+const TRANSIENT = /error connecting|connection reset|timeout|temporarily unavailable|502|503|504|rate limit|EAI_AGAIN|ETIMEDOUT|ECONNRESET/i;
+
+/** Consecutive transient failures tolerated before giving up on the API itself. */
+const MAX_TRANSIENT = 10;
+let transientStreak = 0;
+
+function onTransient(what, stderr) {
+  transientStreak += 1;
+  if (transientStreak > MAX_TRANSIENT) {
+    bail(
+      EXIT.NEEDS_HUMAN,
+      `${what} failed ${MAX_TRANSIENT} times in a row with transient errors — the API, not this PR, is the problem.`,
+      stderr,
+    );
+  }
+  log(`  ⚠ transient API error (${transientStreak}/${MAX_TRANSIENT}), retrying — the PR is fine`);
+}
+
+/**
+ * `gh pr checks` exits NON-ZERO in three very different situations: no check has
  * registered yet (a race for the first ~30s after opening a PR, and the normal
- * steady state for a PR whose paths dispatch no workflow), and a real API
- * failure. Conflating them makes the loop abort on a PR that is merely young.
+ * steady state for a PR whose paths dispatch no workflow); a transient API
+ * failure; and a real error. Conflating them aborts on a PR that is merely young
+ * or merely unlucky.
+ *
+ * Returns null for "nothing yet", 'retry' for "ask again shortly".
  */
 function checksOrPending(pr) {
   const raw = gh(['pr', 'checks', String(pr), '--json', 'name,state,link'], { allowFail: true });
   if (raw && raw.__failed) {
-    if (/no checks reported/i.test(raw.stderr)) return null;
+    if (/no checks reported/i.test(raw.stderr)) { transientStreak = 0; return null; }
+    if (TRANSIENT.test(raw.stderr)) { onTransient('gh pr checks', raw.stderr); return 'retry'; }
     throw new Error(`gh pr checks failed:\n${raw.stderr}`);
   }
+  transientStreak = 0;
   return JSON.parse(raw || '[]');
 }
 
@@ -361,6 +390,10 @@ function watchChecks(pr, verification) {
   const deadline = Date.now() + CONFIG.checksTimeoutMs;
   for (;;) {
     const checks = checksOrPending(pr);
+    if (checks === 'retry') {
+      sleep(CONFIG.pollIntervalMs);
+      continue;
+    }
     if (checks === null) {
       if (Date.now() > deadline) {
         bail(EXIT.NEEDS_HUMAN, 'No check ever registered on this PR, though its paths should dispatch one.');
@@ -408,12 +441,19 @@ function awaitReview(pr) {
   const deadline = Date.now() + CONFIG.reviewTimeoutMs;
 
   for (;;) {
-    const raw = gh(['pr', 'view', String(pr), '--json', 'reviews']);
+    const raw = gh(['pr', 'view', String(pr), '--json', 'reviews'], { allowFail: true });
+    if (raw && raw.__failed) {
+      if (!TRANSIENT.test(raw.stderr)) throw new Error(`gh pr view failed:\n${raw.stderr}`);
+      onTransient('gh pr view', raw.stderr);
+      sleep(CONFIG.pollIntervalMs);
+      continue;
+    }
+    transientStreak = 0;
     const reviews = (JSON.parse(raw || '{}').reviews || []).filter((r) => r.commit?.oid === headSha);
 
     const changes = reviews.filter((r) => r.state === 'CHANGES_REQUESTED');
     if (changes.length) {
-      const rounds = (JSON.parse(gh(['pr', 'view', String(pr), '--json', 'reviews'])).reviews || []).length;
+      const rounds = (JSON.parse(raw || '{}').reviews || []).length;
       if (rounds >= CONFIG.maxReviewRounds) {
         bail(
           EXIT.NEEDS_HUMAN,
