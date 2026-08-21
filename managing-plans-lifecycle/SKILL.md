@@ -1,11 +1,13 @@
 ---
 name: managing-plans-lifecycle
-description: Use when creating a new design/plan, promoting a plan between stages (ideas → ready → ongoing → retired), starting or resuming an `ongoing` plan, retiring a finished plan to `docs/decisions/`, or surveying what plans are in flight. ALSO invoke this whenever `superpowers:brainstorming` or `superpowers:writing-plans` runs — those skills hardcode `docs/superpowers/specs|plans/` with date-prefixed filenames, which this repo does NOT use; this skill redirects their output to `docs/plans/ideas/` with the date prefix stripped. Defines the `docs/plans/{ideas,ready,ongoing}/` lifecycle convention; per-repo policy on what plans live where is encoded in `AGENTS.md`.
+description: Use when creating a new design/plan, promoting a plan between stages (ideas → ready → ongoing → soak → retired), starting or resuming an `ongoing` plan, retiring a finished plan into `docs/{decisions,incidents,ops}/`, or surveying what plans are in flight. ALSO invoke this whenever `superpowers:brainstorming` or `superpowers:writing-plans` runs — those skills hardcode `docs/superpowers/specs|plans/` with date-prefixed filenames, which these repos do NOT use; this skill redirects their output to `docs/plans/ideas/` with the date prefix stripped. Defines the `docs/plans/{ideas,ready,ongoing}/` lifecycle convention; per-repo policy on what plans live where is encoded in `AGENTS.md`.
 ---
 
 # Managing the plans lifecycle
 
-This repo curates design/implementation plans through a four-stage lifecycle. Each stage has its own folder under `docs/plans/`; the file moves between folders as the work matures. Every live plan carries a mandatory priority label: `low`, `medium`, or `high`. After implementation, durable rationale is distilled into `docs/decisions/` and the plan file is deleted. **Code is the source of truth — finished plans are not kept.**
+Plans are temporary coordination docs. They exist to make upcoming or in-progress work findable; once code, tests, release notes, and operational state are the source of truth, the plan is deleted. Each stage has its own folder under `docs/plans/`; the file moves between folders as the work matures. **Code is the source of truth — finished plans are not kept.**
+
+> **Shared skill.** This file is consumed by several repos via the `agent-skills` submodule. It defines the *lifecycle* only. Anything repo-specific — which stages that repo uses, whether the priority label is required, what counts as "verified", where cross-repo plans live — is stated in that repo's `AGENTS.md`, which wins over this file wherever they differ.
 
 This skill does **not** replace `superpowers:brainstorming` or `superpowers:writing-plans`. Those still own the *content* (design questions, task breakdowns). This skill owns the *lifecycle* — where files live, when they move, and what the `ongoing` status header looks like.
 
@@ -17,14 +19,22 @@ docs/
 │   ├── ideas/        # Proposals. May or may not happen. No tasks required.
 │   ├── ready/        # Decided to implement. Plan/tasks written. Not started.
 │   └── ongoing/      # Being implemented. Status header at top is required.
-└── decisions/        # Durable rationale, written when a plan retires. Not in plans/.
+│       └── soak/     # OPTIONAL stage — implementation done and verified in
+│                     # production; only elapsed-time soak remains. See below.
+├── decisions/        # Durable rationale, written when a plan retires.
+├── incidents/        # OPTIONAL — production incident and notable-bug records.
+└── ops/              # OPTIONAL — operational recipes, credential/config facts.
 ```
 
 One file per topic. **Same filename throughout the lifecycle** — only the directory changes.
 
-## Priority label (mandatory)
+`soak/`, `incidents/` and `ops/` exist only in repos whose `AGENTS.md` declares them. A repo that ships continuously and has no store-release or backfill contract does not need `soak/`; don't create it speculatively.
 
-Every file under `docs/plans/{ideas,ready,ongoing}/` must declare exactly one priority label: `low`, `medium`, or `high`.
+## Priority label (per-repo)
+
+Some repos require every file under `docs/plans/{ideas,ready,ongoing}/` to declare exactly one priority label: `low`, `medium`, or `high`. **Check `AGENTS.md` before enforcing it** — where the convention is not declared, do not add the field to files that lack it, and do not flag its absence as a defect.
+
+Where it *is* required:
 
 Use this metadata line near the top of `ideas/` and `ready/` plans, immediately after the title unless the file already has a compact metadata block:
 
@@ -149,16 +159,33 @@ Some repos ship code on dev → beta → prod at different times and run per-env
 Legend: ⬜ pending · ⏳ in progress · ✅ done · ⚠️ blocked (note inline)
 ```
 
-### `ongoing/` → retired (code merged, plan deleted)
+### `ongoing/` → `ongoing/soak/` (optional stage)
 
-When the implementation is merged:
+Only in repos that declare `soak/`. Move a plan there when **all** of these hold:
+
+- The implementation phase is complete.
+- Required deploys, markers, or backfills are **verified from source-of-truth evidence**, not from a checklist.
+- No normal implementation task remains.
+- The only remaining work is letting the deployed state soak before a later contract step — a cleanup, a strict-read flip, a legacy-field removal, or a hard/minimum-supported-version release.
+
+Keep it in plain `ongoing/` when production has not been verified yet, implementation still needs code, a required backfill has not run on every env, or the next step is engineering work rather than elapsed time.
+
+When moving into `soak/`: record exact evidence in the Status block (env, marker path or release, date, counts where available, and the remaining trigger); update relative links in the moved file and inbound links from related plans and scripts; and leave the next action concrete — *"after soak, set backfill gates to vX.Y.Z and remove the legacy fields"*, never *"follow up later"*.
+
+### `ongoing/` (or `soak/`) → retired (plan deleted)
+
+**"Merged" is not the gate — "verified" is.** Never retire a plan because the code was written or the PR landed; retire it when the behaviour is confirmed in the environment that matters. Where a repo ships through staged environments, that means the *final* one, not the first.
 
 1. Open the plan and identify what durable rationale is worth keeping. Use this rubric:
-   - **Keep** (move to `docs/decisions/<topic>.md`): non-obvious design choices, rejected alternatives with reasons, invariants the code enforces but doesn't explain, dependencies on external systems / contracts, postmortems with surprising failure modes.
+   - **Keep** (move to `docs/decisions/<topic>.md`): non-obvious design choices, rejected alternatives with reasons, invariants the code enforces but doesn't explain, dependencies on external systems / contracts.
+   - **Keep** (move to `docs/incidents/<date>-<slug>.md`, where the repo has that folder): production incidents and notable bugs — what happened, scope, recovery. Link out to the `decisions/` doc that fixed it rather than restating it.
+   - **Keep** (move to `docs/ops/<slug>.md`, where the repo has that folder): operational recipes and credential/config facts that aren't a decision.
    - **Delete**: task lists, file-by-file checklists, "how we did it" prose, status headers, rollout tables, anything visible by reading the code or `git log`.
    - **Delete**: outdated assumptions, open questions that got answered by reality.
 
-2. If anything was kept, write `docs/decisions/<topic>.md` using the repo's ADR-lite shape — **Context / Decision / Rejected alternative / What this binds / Revisit-when** (match existing files in `docs/decisions/`). Keep it short — one decision per file, focused on *why* not *what*. Operational step-by-step procedures belong in a skill, not in `decisions/`.
+   **Default to deleting outright.** Most shipped plans warrant no durable doc at all. Do not write a decision doc to summarise a completed plan, and never when the *why* is already recoverable from git, a closed issue, an upstream source, or an existing decision. A decision doc nobody needs is debt.
+
+2. If anything was kept, write it using the repo's ADR-lite shape — **Context / Decision / Rejected alternative / What this binds / Revisit-when** (match existing files in the target folder). Keep it short — one decision per file, focused on *why* not *what*. Operational step-by-step procedures belong in a skill or `ops/`, not in `decisions/`.
 
 3. **Delete** the plan file: `git rm docs/plans/ongoing/<topic>.md`. Do not move it to a `done/` folder. Do not keep it "for reference." Code is the reference.
 
@@ -177,11 +204,14 @@ Do not create files under `docs/superpowers/`. That namespace is retired in this
 When asked "what's in flight" or "what plans do we have":
 
 1. `ls docs/plans/ongoing/` — what's actively being worked on. Read each file's Status section.
-2. `ls docs/plans/ready/` — what's queued.
-3. `ls docs/plans/ideas/` — what's been proposed.
-4. `ls docs/decisions/` — what's already been decided and shipped (durable record).
+2. `ls docs/plans/ongoing/soak/` — done, waiting on elapsed time (where the repo uses it).
+3. `ls docs/plans/ready/` — what's queued.
+4. `ls docs/plans/ideas/` — what's been proposed.
+5. `ls docs/decisions/` — what's already been decided and shipped (durable record).
 
 Don't grep for completion via checkboxes. Folder location is authoritative.
+
+When *auditing* rather than listing, the bar is higher: for each plan that looks stale or misplaced, **state the evidence from the code, not from the filename** — the service exists, the flag is flipped, the backfill marker is present — then recommend exactly one action: keep, promote, move to ongoing, soak, retire, or extract-then-retire. A recommendation resting only on a plan's own prose is worthless; the plan is the thing under suspicion.
 
 ## Anti-patterns
 
@@ -192,3 +222,8 @@ Don't grep for completion via checkboxes. Folder location is authoritative.
 - **Writing a decision doc that restates the implementation.** If a future reader could learn it by reading the code, it doesn't belong in `docs/decisions/`.
 - **Promoting `ideas/` → `ready/` without resolving open questions.** Move the questions to "Out of scope" or answer them. `ready/` means decided.
 - **Re-creating `docs/superpowers/`.** Drafts land directly in `docs/plans/ideas/`.
+- **Marking work `ongoing/` before implementation actually starts.** `ready/` is where decided-but-unstarted work waits; an `ongoing/` plan nobody is touching makes every real one harder to find.
+- **Retiring a plan because the code merged.** Merged is not verified. Retire on confirmed behaviour in the environment that matters.
+- **Inventing a parallel lifecycle taxonomy.** If a state feels unrepresentable, it is almost always `ideas/` (undecided) or `ready/` with the gate stated inline. Adding a folder fragments the index for everyone.
+- **Burying unresolved follow-up work in a PR or chat message.** Those vanish. Update the plan, or create one.
+- **Enforcing a convention this repo never adopted** — the priority label being the usual case. Check `AGENTS.md` first.
