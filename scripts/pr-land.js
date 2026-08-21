@@ -132,12 +132,28 @@ function sh(cmd, { allowFail = false } = {}) {
   }
 }
 
-function gh(args) {
+function gh(args, { allowFail = false } = {}) {
   try {
     return execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (err) {
+    if (allowFail) return { __failed: true, stderr: String(err.stderr || err.message) };
     throw new Error(`gh ${args.join(' ')} failed:\n${err.stderr || err.message}`);
   }
+}
+
+/**
+ * `gh pr checks` exits NON-ZERO in two very different situations: no check has
+ * registered yet (a race for the first ~30s after opening a PR, and the normal
+ * steady state for a PR whose paths dispatch no workflow), and a real API
+ * failure. Conflating them makes the loop abort on a PR that is merely young.
+ */
+function checksOrPending(pr) {
+  const raw = gh(['pr', 'checks', String(pr), '--json', 'name,state,link'], { allowFail: true });
+  if (raw && raw.__failed) {
+    if (/no checks reported/i.test(raw.stderr)) return null;
+    throw new Error(`gh pr checks failed:\n${raw.stderr}`);
+  }
+  return JSON.parse(raw || '[]');
 }
 
 const log = (msg) => console.log(msg);
@@ -318,8 +334,15 @@ function watchChecks(pr, verification) {
 
   const deadline = Date.now() + CONFIG.checksTimeoutMs;
   for (;;) {
-    const raw = gh(['pr', 'checks', String(pr), '--json', 'name,state,link']);
-    const checks = JSON.parse(raw || '[]');
+    const checks = checksOrPending(pr);
+    if (checks === null) {
+      if (Date.now() > deadline) {
+        bail(EXIT.NEEDS_HUMAN, 'No check ever registered on this PR, though its paths should dispatch one.');
+      }
+      log('  waiting… no check has registered yet');
+      sleep(CONFIG.pollIntervalMs);
+      continue;
+    }
     const relevant = checks.filter((c) => c.state !== 'SKIPPED' && c.state !== 'NEUTRAL');
 
     const failed = relevant.filter((c) => ['FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(c.state));
