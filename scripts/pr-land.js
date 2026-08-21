@@ -601,7 +601,12 @@ function reportReap(branch) {
   const wt = sh('git rev-parse --show-toplevel', { allowFail: true });
   const root = sh(`git -C "${common}/.." rev-parse --show-toplevel`, { allowFail: true });
   log('  this worktree is now stale — reap it from the main checkout:');
-  log(`    git -C ${root} worktree remove ${wt} && git -C ${root} branch -d ${branch}`);
+  // --force is REQUIRED, not defensive: `git worktree remove` refuses outright
+  // on any worktree containing a submodule ("working trees containing
+  // submodules cannot be moved or removed"), and this contract puts a submodule
+  // in every repo that adopts it. Without --force the plain command always
+  // fails here, which is how worktrees pile up.
+  log(`    git -C ${root} worktree remove --force ${wt} && git -C ${root} branch -d ${branch}`);
 }
 
 // ---------------------------------------------------------------------------
