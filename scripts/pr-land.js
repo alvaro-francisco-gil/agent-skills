@@ -281,8 +281,12 @@ function verificationNote(files) {
   step('Verification coverage');
 
   if (ciCovers(files)) {
-    const covered = touches(files, CONFIG.ciPaths);
-    log(`  ${covered.length}/${files.length} changed path(s) are in CI's filter — CI will run.`);
+    if ((CONFIG.ciPaths || []).includes('**')) {
+      log(`  this repo's CI has no path filter — it runs on every PR.`);
+    } else {
+      const covered = touches(files, CONFIG.ciPaths);
+      log(`  ${covered.length}/${files.length} changed path(s) are in CI's filter — CI will run.`);
+    }
     return { ciWillRun: true, note: 'CI covers this diff.' };
   }
 
@@ -313,6 +317,21 @@ function ensurePr(branch, verification) {
 
   sh(`git push -u origin ${branch}`);
 
+  // `gh pr create --label` hard-fails when the label does not exist in the repo,
+  // which is the normal state the first time a repo adopts this loop. Create it
+  // idempotently rather than aborting on a one-time setup detail.
+  if (CONFIG.reviewLabel) {
+    const made = gh(
+      ['label', 'create', CONFIG.reviewLabel, '--description', 'Request an automated review', '--force'],
+      { allowFail: true },
+    );
+    if (made && made.__failed) {
+      log(`  ⚠ could not ensure the "${CONFIG.reviewLabel}" label exists — opening the PR without it.`);
+      log('    A PR with no review label gets no review, so it will stop at exit 30.');
+      CONFIG.reviewLabel = null;
+    }
+  }
+
   const subject = sh(`git log -1 --format=%s`);
   const body = [
     sh(`git log origin/${CONFIG.baseBranch}..HEAD --format='- %s'`),
@@ -323,7 +342,7 @@ function ensurePr(branch, verification) {
   const url = gh([
     'pr', 'create',
     '--base', CONFIG.baseBranch,
-    '--label', CONFIG.reviewLabel,
+    ...(CONFIG.reviewLabel ? ['--label', CONFIG.reviewLabel] : []),
     '--title', subject,
     '--body', body,
   ]);
