@@ -477,7 +477,18 @@ function awaitReview(pr) {
       bail(
         EXIT.NEEDS_HUMAN,
         'No review landed on this head SHA within the timeout.',
-        '  The reviewer polls every ~15 min; a PR that dispatched no CI run relies on that backstop.',
+        [
+          '  Two very different situations produce this, and the script cannot tell them apart:',
+          '',
+          '  1. This repo has NO reviewer wired yet. Then exit 30 is the DESIGNED outcome, not a',
+          '     failure — every step up to the merge is done and the PR is yours to merge. Leave',
+          `     requireApprovingReview true: setting it false would merge on CI alone, which`,
+          '     removes review rather than replacing it.',
+          '  2. A reviewer IS wired and simply has not posted yet. It polls every ~15 min, and a PR',
+          '     that dispatched no CI run relies on that backstop — re-run in a few minutes.',
+          '',
+          `  PR: ${gh(['pr', 'view', String(pr), '--json', 'url', '--jq', '.url'], { allowFail: true })}`,
+        ].join('\n'),
       );
     }
     log('  waiting for a review on this commit…');
