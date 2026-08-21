@@ -7,7 +7,8 @@
  * it again after fixing. Same-input runs are idempotent — it reuses an existing
  * PR rather than opening a second one.
  *
- *   0   merged, branch deleted, worktree reapable
+ *   0   merged; remote branch deleted; the worktree is REPORTED as reapable,
+ *       not removed — a process cannot delete the directory it runs in
  *   10  CI red (failures printed) — fix, re-run
  *   20  review requested changes (findings printed) — fix the cause, re-run
  *   30  hard-stop, or review rounds exhausted — hand to a human, do NOT retry
@@ -578,6 +579,29 @@ function merge(pr, branch) {
   log(deleted && deleted.__failed
     ? `  remote branch ${branch} already gone`
     : `  deleted remote ${branch}`);
+
+  reportReap(branch);
+}
+
+/**
+ * A process cannot remove the worktree it is standing in, so this reports the
+ * cleanup rather than performing it. Saying so explicitly matters: worktrees
+ * accumulate one per landed PR, and "the script cleans up" was claimed before it
+ * was true — 14 had piled up in one repo by the time anyone checked.
+ */
+function reportReap(branch) {
+  const gitDir = sh('git rev-parse --git-dir', { allowFail: true }) || '';
+  const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
+  const inWorktree = gitDir !== common;
+  if (!inWorktree) {
+    sh(`git branch -d ${branch}`, { allowFail: true });
+    log(`  deleted local ${branch}`);
+    return;
+  }
+  const wt = sh('git rev-parse --show-toplevel', { allowFail: true });
+  const root = sh(`git -C "${common}/.." rev-parse --show-toplevel`, { allowFail: true });
+  log('  this worktree is now stale — reap it from the main checkout:');
+  log(`    git -C ${root} worktree remove ${wt} && git -C ${root} branch -d ${branch}`);
 }
 
 // ---------------------------------------------------------------------------
