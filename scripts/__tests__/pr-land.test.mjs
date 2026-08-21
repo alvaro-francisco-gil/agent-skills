@@ -91,3 +91,10 @@ test('exit codes are stable — agents branch on these', () => {
     PREFLIGHT: 40,
   });
 });
+
+test('ciPaths ["**"] means the repo has no path filter and CI always runs', () => {
+  const all = loadConfig('/nonexistent');
+  all.ciPaths = ['**'];
+  assert.equal(ciCovers(['docs/anything.md'], all), true);
+  assert.equal(ciCovers([], all), false, 'an empty diff still covers nothing');
+});

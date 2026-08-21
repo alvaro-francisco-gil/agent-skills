@@ -235,8 +235,15 @@ function hardStopHits(files, commitMessages = '', cfg = CONFIG) {
   return hits;
 }
 
-/** Pure: does CI's path filter cover any of this diff? */
+/**
+ * Pure: does CI's path filter cover any of this diff?
+ *
+ * `["**"]` means the repo's CI has NO path filter and always runs — say that
+ * explicitly rather than listing every top-level directory, which silently
+ * stops being true the moment someone adds one.
+ */
 function ciCovers(files, cfg = CONFIG) {
+  if ((cfg.ciPaths || []).includes('**')) return files.length > 0;
   return touches(files, cfg.ciPaths).length > 0;
 }
 
