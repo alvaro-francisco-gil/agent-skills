@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "alvaro-agent-skills",
+  "description": "Shared, repo-agnostic agent skills: the plans lifecycle and the autonomous delivery contract.",
+  "owner": {
+    "name": "Alvaro Francisco Gil"
+  },
+  "plugins": [
+    {
+      "name": "agent-workflow",
+      "description": "Autonomous delivery contract (ship-a-feature) plus the docs/plans lifecycle convention (managing-plans-lifecycle). For repos wired with the agent-skills submodule, use that instead — never both, or the skills load twice.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Alvaro Francisco Gil"
+      },
+      "source": "./",
+      "category": "workflow"
+    }
+  ]
+}

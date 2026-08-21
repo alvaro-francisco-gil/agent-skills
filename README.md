@@ -34,21 +34,24 @@ skill), and each shared skill is symlinked into `.agents/skills/` at depth 1:
 
 ```
 .agents/_shared/                            # this repo, as a submodule
-   managing-plans-lifecycle/SKILL.md
-   ship-a-feature/SKILL.md
+   skills/managing-plans-lifecycle/SKILL.md
+   skills/ship-a-feature/SKILL.md
    scripts/pr-land.js
-.agents/skills/managing-plans-lifecycle  →  ../_shared/managing-plans-lifecycle   # symlink
-.agents/skills/ship-a-feature            →  ../_shared/ship-a-feature             # symlink
-.claude/skills                           →  ../.agents/skills                     # symlink
-scripts/pr-land.js                       →  ../.agents/_shared/scripts/pr-land.js # symlink
+.agents/skills/managing-plans-lifecycle  →  ../_shared/skills/managing-plans-lifecycle
+.agents/skills/ship-a-feature            →  ../_shared/skills/ship-a-feature
+.claude/skills                           →  ../.agents/skills
+scripts/pr-land.js                       →  ../.agents/_shared/scripts/pr-land.js
 ```
+
+The `skills/` directory is required by the Claude Code plugin layout (see
+**Two channels** below); submodule consumers just point one level deeper.
 
 ### Add to a new repo
 
 ```sh
 git submodule add https://github.com/alvaro-francisco-gil/agent-skills.git .agents/_shared
-ln -s ../_shared/managing-plans-lifecycle .agents/skills/managing-plans-lifecycle
-ln -s ../_shared/ship-a-feature           .agents/skills/ship-a-feature
+ln -s ../_shared/skills/managing-plans-lifecycle .agents/skills/managing-plans-lifecycle
+ln -s ../_shared/skills/ship-a-feature           .agents/skills/ship-a-feature
 ln -s ../.agents/_shared/scripts/pr-land.js scripts/pr-land.js
 git add .gitmodules .agents/_shared .agents/skills scripts/pr-land.js
 ```
@@ -105,3 +108,37 @@ git submodule update --init
 git submodule update --remote .agents/_shared
 git add .agents/_shared && git commit -m "chore: bump agent-skills"
 ```
+
+## Two channels — pick one per repo, never both
+
+This repo is both a **git submodule** and a **Claude Code plugin marketplace**. They deliver
+the same skills by different routes, and a repo that uses both loads every skill twice.
+
+| | Submodule (primary) | Marketplace plugin |
+|---|---|---|
+| Wiring | `git submodule add` + symlinks | `/plugin marketplace add alvaro-francisco-gil/agent-skills` |
+| Version | **pinned** per repo, visible in `git log` as a gitlink SHA | whatever is installed |
+| Sees `scripts/pr-land.js` | yes, as a repo file `pnpm pr:land` can run | no |
+| Visible to CI | yes, with `submodules: true` on checkout | no |
+| Visible to Codex | yes — it reads `.agents/skills/` | no |
+| Cloud / mobile sessions | yes, the files are in the repo | only via `enabledPlugins` in `.claude/settings.json` |
+
+**Use the submodule** for any repo with an `AGENTS.md`, a CI pipeline, or Codex wiring — that
+is where pinning, `pr:land`, and cross-tool visibility matter.
+
+**Use the plugin** for small repos that have none of that and just want the intake protocol:
+
+```jsonc
+// .claude/settings.json — makes the skills reach cloud and mobile sessions too
+{
+  "extraKnownMarketplaces": {
+    "alvaro-agent-skills": {
+      "source": { "source": "github", "repo": "alvaro-francisco-gil/agent-skills" }
+    }
+  },
+  "enabledPlugins": ["agent-workflow@alvaro-agent-skills"]
+}
+```
+
+Note that a project-declared plugin from an external source still needs one
+`claude plugin install` per machine before it loads.
