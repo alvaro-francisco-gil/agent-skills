@@ -239,7 +239,12 @@ function observe(deadlines) {
   const baseChanged = (sh(`git diff --name-only ${mergeBase} ${baseTip}`, { allowFail: true }) || '')
     .split('\n').filter(Boolean);
 
-  const remoteSha = sh(`git rev-parse origin/${branchName}`, { allowFail: true });
+  // ls-remote, NOT `git rev-parse origin/<branch>`: the tracking ref is a local
+  // cache that `git fetch origin <base> --prune` does not prune, so a branch
+  // deleted on the server still looks present. Observing means asking the
+  // remote, not reading what we happen to remember.
+  const remoteLine = sh(`git ls-remote --heads origin ${branchName}`, { allowFail: true });
+  const remoteSha = remoteLine ? remoteLine.split(/\s+/)[0] : null;
   const pr = observePr(branchName) || { state: 'unknown', reviews: [] };
   const checks = pr.number ? observeChecks(pr.number) : { state: 'none', failures: [] };
 
@@ -432,6 +437,13 @@ function main() {
 
     const verdict = decide(s);
     if (verdict.exit !== undefined) finish(verdict, s);
+
+    if (DRY_RUN) {
+      log(`\n▸ next action: ${verdict.action}`);
+      log(`  ${verdict.why}`);
+      log('\n[dry-run] stopping here — a dry run cannot converge, because its actions are no-ops.');
+      process.exit(0);
+    }
 
     const isWait = verdict.action === ACTION.WAIT_CHECKS || verdict.action === ACTION.WAIT_REVIEW;
     if (!isWait) {
