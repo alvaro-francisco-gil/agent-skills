@@ -239,6 +239,16 @@ function preflight() {
 
   const ahead = sh(`git rev-list --count origin/${CONFIG.baseBranch}..HEAD`);
   if (ahead === '0') {
+    // Distinguish "this already landed" from "you have nothing to land". After a
+    // successful merge the branch is legitimately zero ahead, and a re-run must
+    // report success rather than a preflight failure.
+    const merged = gh(
+      ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number'],
+      { allowFail: true },
+    );
+    if (merged && !merged.__failed && merged) {
+      done(`#${merged} already landed — branch is fully merged into ${CONFIG.baseBranch}`);
+    }
     bail(EXIT.PREFLIGHT, `No commits ahead of origin/${CONFIG.baseBranch} — nothing to land.`);
   }
 
@@ -535,14 +545,39 @@ function stalenessCheck(branch, files) {
   return true;
 }
 
+/** Already merged? Then this run has nothing to do and must not report failure. */
+function alreadyMerged(pr) {
+  const raw = gh(['pr', 'view', String(pr), '--json', 'state'], { allowFail: true });
+  if (raw && raw.__failed) return false;
+  return JSON.parse(raw || '{}').state === 'MERGED';
+}
+
 function merge(pr, branch) {
   step('Merge');
   if (DRY_RUN) {
     log(`  [dry-run] would merge PR #${pr}`);
     return;
   }
-  gh(['pr', 'merge', String(pr), '--merge', '--delete-branch']);
-  log(`  merged #${pr}, deleted ${branch}`);
+
+  if (alreadyMerged(pr)) {
+    log(`  #${pr} was already merged — nothing to do`);
+  } else {
+    // NOT `--delete-branch`: that makes gh check out the base branch locally
+    // after merging, which fails outright when another worktree holds it —
+    // the normal state here, since this contract tells agents to work in
+    // worktrees. It failed AFTER the merge had already gone through, turning a
+    // successful landing into exit 40. The remote branch is deleted below, and
+    // `delete_branch_on_merge` on the repo covers it server-side regardless.
+    gh(['pr', 'merge', String(pr), '--merge']);
+    log(`  merged #${pr}`);
+  }
+
+  const deleted = gh(['api', '-X', 'DELETE', `repos/{owner}/{repo}/git/refs/heads/${branch}`], {
+    allowFail: true,
+  });
+  log(deleted && deleted.__failed
+    ? `  remote branch ${branch} already gone`
+    : `  deleted remote ${branch}`);
 }
 
 // ---------------------------------------------------------------------------
