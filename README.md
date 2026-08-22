@@ -89,6 +89,23 @@ review gate rather than silently auto-merging something it never declared.
 - `requireApprovingReview: false` is a **weaker** bar, not an equivalent one. Set it only where
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.
 
+### Wiring the reviewer: a public repo cannot use the immediate trigger
+
+Some repos here call a private homelab reusable workflow to poke the reviewer the moment
+CI goes green, instead of waiting for its ~15-minute poll. **That is only available to a
+private caller.** A public repo cannot call a private repo's reusable workflow, and the
+failure is not the one you would design for:
+
+- GitHub resolves the callee when it **creates the run**, before evaluating any job-level
+  `if:`. Gating the job behind an unset variable does not make it inert.
+- The run then completes with **zero jobs** — every real test in that workflow is skipped
+  too, and the PR shows no checks rather than a failing check.
+
+Seen on 2026-08-22 in two public repos (cultuvilla run `32594475090`, lectoemocion-platform
+run `32594747047`), both from a job believed to be inert. Public repos use the poll backstop,
+which runs entirely on the reviewer's side and needs only a registry entry — latency, not
+capability. Check `gh api repos/OWNER/REPO --jq .visibility` before adding the job.
+
 ### Verify the wiring
 
 ```sh
