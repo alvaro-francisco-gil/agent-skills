@@ -70,6 +70,7 @@ review gate rather than silently auto-merging something it never declared.
   "baseBranch": "develop",
   "reviewLabel": "ai-review",
   "requireApprovingReview": true,
+  "mergeMethod": "merge",
   "ciPaths": ["src/", "functions/", "package.json", "pnpm-lock.yaml"],
   "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
   "hardStop": [
@@ -81,6 +82,9 @@ review gate rather than silently auto-merging something it never declared.
 
 - `ciPaths` **must mirror the repo's CI path filter.** If they drift, the vacuous-green guard
   either blocks needlessly or — worse — reads "no run dispatched" as "tests passed".
+- `mergeMethod` is `"merge"`, `"squash"` or `"rebase"` — match whatever the repo's history
+  already does, since the loop is not the place to change it. An unrecognised value is
+  rejected when the config loads, not at the merge.
 - `hardStop[].pattern` is a regex *source string*, not `/slashes/`; add `"flags": "i"` if needed.
 - `requireApprovingReview: false` is a **weaker** bar, not an equivalent one. Set it only where
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.

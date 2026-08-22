@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { hardStopHits, ciCovers, needsRebase, loadConfig, DEFAULTS, EXIT } = require('../pr-land.js');
@@ -24,6 +27,25 @@ Object.assign(cfg, {
 test('defaults fail closed: no hard-stop rules, but review still required', () => {
   assert.deepEqual(DEFAULTS.hardStop, []);
   assert.equal(DEFAULTS.requireApprovingReview, true);
+});
+
+/** Writes a throwaway repo root carrying just `.agents/land.config.json`. */
+function repoWithConfig(config) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'land-cfg-'));
+  fs.mkdirSync(path.join(root, '.agents'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.agents/land.config.json'), JSON.stringify(config));
+  return root;
+}
+
+test('mergeMethod defaults to a merge commit and is overridable', () => {
+  assert.equal(DEFAULTS.mergeMethod, 'merge');
+  assert.equal(loadConfig(repoWithConfig({ mergeMethod: 'squash' })).mergeMethod, 'squash');
+});
+
+test('an unusable mergeMethod is rejected at load, not at the merge', () => {
+  // The merge is the one step where a config typo must not surface: by then the
+  // push, the CI wait and the review have all already succeeded.
+  assert.throws(() => loadConfig(repoWithConfig({ mergeMethod: 'sqush' })), /mergeMethod/);
 });
 
 test('loadConfig compiles pattern strings into regexes', () => {

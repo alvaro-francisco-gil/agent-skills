@@ -61,6 +61,7 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "protectedBranches": ["beta", "main"],
 //     "reviewLabel": "ai-review",
 //     "requireApprovingReview": true,
+//     "mergeMethod": "merge",                    // or "squash" / "rebase"
 //     "ciPaths": ["src/", "package.json"],       // or ["**"] when CI has no filter
 //     "hardStop": [{ "pattern": "^firestore\\.rules$", "why": "security rules" }],
 //     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"]
@@ -75,6 +76,10 @@ const DEFAULTS = {
   reviewLabel: 'ai-review',
   requireApprovingReview: true,
   maxReviewRounds: 5,
+  // How this repo integrates a PR. A repo whose history is squashed and one
+  // whose history keeps merge commits are both correct; which one is a property
+  // of the repo, so it is data here rather than a value baked into the loop.
+  mergeMethod: 'merge',
   ciPaths: [],
   hardStop: [],
   hardStopTrailerSource: '^Breaking-Client:',
@@ -102,6 +107,11 @@ function loadConfig(repoRoot = process.cwd()) {
     pattern: rule.pattern instanceof RegExp ? rule.pattern : new RegExp(rule.pattern, rule.flags || ''),
   }));
   merged.hardStopTrailer = new RegExp(merged.hardStopTrailerSource, 'm');
+  // Caught here rather than at the merge, which is the one moment a config typo
+  // must not surface: everything up to it has already succeeded.
+  if (!['merge', 'squash', 'rebase'].includes(merged.mergeMethod)) {
+    throw new Error(`${CONFIG_FILENAME}: mergeMethod must be "merge", "squash" or "rebase" (got ${JSON.stringify(merged.mergeMethod)})`);
+  }
   merged.configFound = fs.existsSync(file);
   return merged;
 }
@@ -344,7 +354,7 @@ function act(action, s) {
       // NOT --delete-branch: that makes gh check out the base branch locally
       // afterwards, which fails when another worktree holds it — the normal state
       // under this contract. The remote ref is deleted as its own reconciled step.
-      gh(['pr', 'merge', String(s.pr.number), '--merge']);
+      gh(['pr', 'merge', String(s.pr.number), `--${CONFIG.mergeMethod}`]);
       return log(`  merged #${s.pr.number}`);
 
     case ACTION.DELETE_REMOTE: {
