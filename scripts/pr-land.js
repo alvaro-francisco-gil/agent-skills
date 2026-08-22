@@ -386,10 +386,20 @@ function reportReap(s) {
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
   const wt = sh('git rev-parse --show-toplevel', { allowFail: true });
   const root = sh(`git -C "${common}/.." rev-parse --show-toplevel`, { allowFail: true });
+  // `git worktree remove` refuses outright on a worktree containing a submodule,
+  // and this contract puts one in every adopting repo — so the refusal is the
+  // NORMAL case here, not the exceptional one. That is exactly what makes
+  // `--force` the wrong answer: reached for every single time, it stops reading
+  // as "override a safety check" and starts reading as "the reap command", and
+  // it discards uncommitted work without saying so. Delete the directory, prune
+  // the registration, and let `branch -d` do the merged-ness check it exists for.
+  if (sh('git status --porcelain', { allowFail: true })) {
+    log('  this worktree is stale but NOT clean — it has uncommitted changes:');
+    log(`    git -C ${wt} status --short`);
+    return log('  reap it by hand once you have decided what those changes are.');
+  }
   log('  this worktree is now stale — reap it from the main checkout:');
-  // --force is REQUIRED: `git worktree remove` refuses outright on a worktree
-  // containing a submodule, and this contract puts one in every adopting repo.
-  log(`    git -C ${root} worktree remove --force ${wt} && git -C ${root} branch -d ${s.branch.name}`);
+  log(`    rm -rf ${wt} && git -C ${root} worktree prune && git -C ${root} branch -d ${s.branch.name}`);
 }
 
 function finish(verdict, s) {
