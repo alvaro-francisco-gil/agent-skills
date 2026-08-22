@@ -169,6 +169,23 @@ test('a repo with no reviewer requirement merges on green alone', () => {
   assert.equal(decide(s).action, ACTION.MERGE);
 });
 
+test('the merge reason never claims a review that was not required', () => {
+  // The stated reason is the only record of what bar a merge actually cleared.
+  // Two repos here run different bars, so a fixed "green and approved" string
+  // would log a review that never happened in one of them.
+  const noReview = withState({ requireApprovingReview: false, review: { state: 'none', rounds: 0, body: '' } });
+  assert.doesNotMatch(decide(noReview).why, /approved/);
+  assert.match(decide(noReview).why, /no review required/);
+  assert.match(decide(base()).why, /approved/);
+});
+
+test('a gated PR reports the same bar it actually cleared', () => {
+  const s = withState({ requireApprovingReview: false, review: { state: 'none', rounds: 0, body: '' }, gated: ['security rules'] });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.NEEDS_HUMAN);
+  assert.doesNotMatch(d.why, /approved/);
+});
+
 // --- integration and the gate green cannot answer ---------------------------
 
 test('base moved into this diff → rebase', () => {

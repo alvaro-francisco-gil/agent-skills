@@ -178,12 +178,22 @@ function decide(s) {
   if (s.gated.length) {
     return {
       exit: EXIT.NEEDS_HUMAN,
-      why: 'green and approved, but this PR is gated — a human merges it',
+      why: `${bar(s)}, but this PR is gated — a human merges it`,
       detail: s.gated.map((g) => `  · ${g}`).join('\n') + `\n\n  PR: ${s.pr.url}`,
     };
   }
 
-  return { action: ACTION.MERGE, why: 'green, approved, current, and ungated' };
+  return { action: ACTION.MERGE, why: `${bar(s)}, current, and ungated` };
+}
+
+/**
+ * What was actually cleared, in the words of the bar this repo set. A repo with
+ * `requireApprovingReview: false` merges on CI alone; saying "approved" there
+ * would put a review in the log that never happened, and the log is how anyone
+ * reconstructs why something merged.
+ */
+function bar(s) {
+  return s.requireApprovingReview ? 'green and approved' : 'green (no review required here)';
 }
 
 module.exports = { decide, EXIT, ACTION };
