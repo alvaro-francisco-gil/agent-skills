@@ -29,14 +29,16 @@
  * added, it is the shape: "already merged" is just an observation whose gap to the
  * desired state is empty.
  *
- * Two guards survive from the pipeline version, because they are judgement rather
- * than perception:
+ * Three guards are judgement rather than perception, so they live here:
  *
  * - **Vacuous green is not green.** CI is usually path-filtered, so a PR touching
  *   only docs or infra dispatches no run at all. Such a PR is marked UNVERIFIED in
  *   its body and rests on review alone.
  * - **Staleness is semantic, not chronological.** Rebase only when the base's
  *   changed paths actually intersect this PR's, or touch a shared blast radius.
+ * - **A lane that never ran is not a lane that passed.** GitHub reports "skipped
+ *   by a path filter" and "skipped because my dependency died" with the same
+ *   word, and only the second can merge an unvalidated diff. See `checksVerdict`.
  *
  * All repo-specific values are DATA, in `.agents/land.config.json`. This file is
  * shared verbatim across repos via the `agent-skills` submodule; if you are
@@ -63,6 +65,7 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "requireApprovingReview": true,
 //     "mergeMethod": "merge",                    // or "squash" / "rebase"
 //     "ciPaths": ["src/", "package.json"],       // or ["**"] when CI has no filter
+//     "requiredLanes": ["Emulators · Vitest"],   // skipped == failed for these
 //     "hardStop": [{ "pattern": "^firestore\\.rules$", "why": "security rules" }],
 //     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"]
 //   }
@@ -81,6 +84,9 @@ const DEFAULTS = {
   // of the repo, so it is data here rather than a value baked into the loop.
   mergeMethod: 'merge',
   ciPaths: [],
+  // Lanes whose absence is itself a failure when CI covers the diff. Empty by
+  // default: naming one is a claim about a specific repo's workflows.
+  requiredLanes: [],
   hardStop: [],
   hardStopTrailerSource: '^Breaking-Client:',
   sharedBlastRadius: [],
@@ -223,19 +229,112 @@ function observePr(branch) {
   };
 }
 
-function observeChecks(pr) {
+// A `gh pr checks` state of SKIPPED is two utterly different facts wearing one
+// word, and telling them apart is the whole of the guard below:
+//
+//   (a) NOT APPLICABLE — a path filter matched nothing, or an `if:` evaluated
+//       false. Routine and constant: CI here is path-filtered, and lanes like
+//       "Build image + deploy to Cloud Run" (`if: github.event_name == 'push'`)
+//       are skipped by design on every PR. Blocking on these would wedge nearly
+//       every PR in every consuming repo.
+//   (b) DEPENDENCY CASCADE — a `needs:` upstream failed or was cancelled, so
+//       GitHub skipped this job. The lane never ran. This is the one shape of
+//       "not red" that can merge a diff no test ever looked at.
+//
+// The job API does not say which. Verified against the live incident: the
+// cascaded skip (Emulators, run 33126802372) and the path-filtered skip (Cloud
+// Run deploy, run 33126802218) on the same head SHA are byte-identical in
+// `/actions/jobs/<id>` — conclusion `skipped`, `runner_name` null, `steps` [],
+// degenerate timestamps. Nothing local to the job distinguishes them.
+//
+// What does distinguish them is the run they sit in. `needs:` cannot cross
+// workflows, so a cascade's cause is always a sibling job in the SAME run.
+// Hence: a skipped check is a cascade suspect iff its own run contains a job
+// that reached a terminal non-success conclusion. On the fixtures that
+// separates the two cases exactly — the CI run held the failure and both
+// cascaded skips; the Web run held only successes and the legitimate skip.
+//
+// This is deliberately coarser than walking `needs:` through the workflow YAML.
+// Its imprecision is one-directional and cheap: a run holding an unrelated
+// failure *and* an unrelated legitimate skip over-blocks — but such a run is
+// already red, so the verdict does not change. It buys that with no YAML
+// parsing, no display-name matching (`name: Audit ${{ matrix.env }}` does not
+// match anything), and no extra API call: `gh pr checks` already reports the
+// run in each `link`.
+
+/** Terminal, not success. Any of these in a run explains a sibling's skip. */
+const CASCADE_CAUSES = ['FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED', 'CANCELLED'];
+/** States that are a verdict against the diff itself. */
+const HARD_FAILURE = ['FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED'];
+const STILL_RUNNING = ['PENDING', 'QUEUED', 'IN_PROGRESS'];
+
+/** The run a check belongs to, read off its own link. */
+function runIdOf(link) {
+  const m = /\/actions\/runs\/(\d+)\b/.exec(String(link || ''));
+  return m ? m[1] : null;
+}
+
+/**
+ * Why this SKIPPED check must block, or null if it is a legitimate skip.
+ * Pure, and takes the whole check list, so it is asserted against recorded
+ * fixtures rather than smoke-tested against a live PR.
+ */
+function skipBlocks(check, causedRuns, ciWillRun, cfg) {
+  const run = runIdOf(check.link);
+  if (run && causedRuns.has(run)) {
+    return 'a job in its own run failed or was cancelled — this lane never ran';
+  }
+  // Belt and braces for the case the run-level signal cannot see: a lane the
+  // repo names as required, skipped on a diff CI is supposed to cover, in a run
+  // that now looks clean (a single failed job re-run green leaves its dependent
+  // skipped from the earlier attempt). Opt-in and empty by default, so an
+  // unconfigured repo keeps today's behaviour exactly.
+  if (ciWillRun && (cfg.requiredLanes || []).includes(check.name)) {
+    return 'a required lane, skipped on a diff CI covers — it did not run';
+  }
+  return null;
+}
+
+/**
+ * The merge gate's reading of the check list.
+ *
+ * Skipped checks used to be filtered out BEFORE failures and pending were
+ * computed, which made a cascaded skip invisible to the gate rather than merely
+ * absent from a badge row. See the note above.
+ */
+function checksVerdict(checks, { ciWillRun = false } = {}, cfg = CONFIG) {
+  const skipped = checks.filter((c) => c.state === 'SKIPPED');
+  const live = checks.filter((c) => c.state !== 'SKIPPED' && c.state !== 'NEUTRAL');
+
+  const causedRuns = new Set(
+    checks.filter((c) => CASCADE_CAUSES.includes(c.state)).map((c) => runIdOf(c.link)).filter(Boolean),
+  );
+  const blockingSkips = skipped
+    .map((c) => {
+      const why = skipBlocks(c, causedRuns, ciWillRun, cfg);
+      return why ? { ...c, why } : null;
+    })
+    .filter(Boolean);
+
+  // Every check skipped and none of them suspect is still "none": a PR whose
+  // diff dispatched nothing has not been verified, and `ciWillRun` decides what
+  // that means.
+  if (!live.length && !blockingSkips.length) return { state: 'none', failures: [] };
+
+  const failures = [...live.filter((c) => HARD_FAILURE.includes(c.state)), ...blockingSkips];
+  if (failures.length) return { state: 'red', failures };
+  const pending = live.filter((c) => STILL_RUNNING.includes(c.state));
+  return { state: pending.length ? 'pending' : 'green', failures: [] };
+}
+
+function observeChecks(pr, ciWillRun) {
   const raw = gh(['pr', 'checks', String(pr), '--json', 'name,state,link'], { allowFail: true });
   if (failed(raw)) {
     // "no checks reported" is a real answer: none have registered yet.
     if (/no checks reported/i.test(raw.stderr)) return { state: 'none', failures: [] };
     return null; // unknown
   }
-  const all = JSON.parse(raw || '[]').filter((c) => c.state !== 'SKIPPED' && c.state !== 'NEUTRAL');
-  if (!all.length) return { state: 'none', failures: [] };
-  const failures = all.filter((c) => ['FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(c.state));
-  if (failures.length) return { state: 'red', failures };
-  const pending = all.filter((c) => ['PENDING', 'QUEUED', 'IN_PROGRESS'].includes(c.state));
-  return { state: pending.length ? 'pending' : 'green', failures: [] };
+  return checksVerdict(JSON.parse(raw || '[]'), { ciWillRun });
 }
 
 function observe(deadlines) {
@@ -256,7 +355,10 @@ function observe(deadlines) {
   const remoteLine = sh(`git ls-remote --heads origin ${branchName}`, { allowFail: true });
   const remoteSha = remoteLine ? remoteLine.split(/\s+/)[0] : null;
   const pr = observePr(branchName) || { state: 'unknown', reviews: [] };
-  const checks = pr.number ? observeChecks(pr.number) : { state: 'none', failures: [] };
+  // Computed before the checks are read, because whether CI was *meant* to run
+  // is what makes a required lane's absence meaningful.
+  const ciWillRun = ciCovers(files);
+  const checks = pr.number ? observeChecks(pr.number, ciWillRun) : { state: 'none', failures: [] };
 
   const gitDir = sh('git rev-parse --git-dir', { allowFail: true }) || '';
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
@@ -284,7 +386,7 @@ function observe(deadlines) {
     review: reviewFor(pr.reviews, headSha),
     remoteBranchExists: Boolean(remoteSha),
     files,
-    ciWillRun: ciCovers(files),
+    ciWillRun,
     gated: hardStopHits(files, sh(`git log origin/${CONFIG.baseBranch}..HEAD --format=%B`, { allowFail: true }) || ''),
     base: needsRebase(baseChanged, files),
     checksDeadlinePassed: Date.now() > deadlines.checks,
@@ -499,4 +601,5 @@ if (require.main === module) {
 module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, needsRebase, touches, reviewFor,
+  checksVerdict, runIdOf,
 };

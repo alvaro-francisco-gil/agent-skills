@@ -111,7 +111,9 @@ function decide(s) {
       exit: EXIT.CI_RED,
       why: 'CI is red',
       detail:
-        s.checks.failures.map((c) => `  · ${c.name}\n    ${c.link}`).join('\n') +
+        s.checks.failures
+          .map((c) => `  · ${c.name}${c.why ? ` — ${c.why}` : ''}\n    ${c.link}`)
+          .join('\n') +
         '\n\n  Read the log before assuming it is your code. An infrastructure failure — a broken\n' +
         '  runner cache, a starved lane — is not a regression to "fix".',
     };
