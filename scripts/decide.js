@@ -130,7 +130,18 @@ function decide(s) {
   }
 
   // --- review ---------------------------------------------------------------
-  if (s.review.state === 'changes_requested') {
+  // The cap is a budget, and each repo declares what running out of it MEANS.
+  //   "handoff" — the cap OPENS a human conversation (the default: a reviewer
+  //               still objecting after N rounds is a signal, not noise).
+  //   "merge"   — the cap CLOSES the review conversation, and the PR then lands
+  //               on CI green alone. For repos where each round costs real money
+  //               and the marginal one stopped paying for itself. It buys a pass
+  //               on the review bar and on NOTHING else: red CI still exits 10,
+  //               and the hard-stop gate below still hands the PR to a human
+  //               however many rounds were spent.
+  const reviewSpent = s.roundsExhausted === 'merge' && s.review.rounds >= s.maxReviewRounds;
+
+  if (!reviewSpent && s.review.state === 'changes_requested') {
     if (s.review.rounds >= s.maxReviewRounds) {
       return {
         exit: EXIT.NEEDS_HUMAN,
@@ -144,7 +155,7 @@ function decide(s) {
       detail: `${s.review.body}\n\n  Fix the cause, not the symptom. Do not silence the finding.`,
     };
   }
-  if (s.requireApprovingReview && s.review.state !== 'approved') {
+  if (!reviewSpent && s.requireApprovingReview && s.review.state !== 'approved') {
     if (s.reviewDeadlinePassed) {
       return {
         exit: EXIT.NEEDS_HUMAN,
@@ -180,12 +191,12 @@ function decide(s) {
   if (s.gated.length) {
     return {
       exit: EXIT.NEEDS_HUMAN,
-      why: `${bar(s)}, but this PR is gated — a human merges it`,
+      why: `${bar(s, reviewSpent)}, but this PR is gated — a human merges it`,
       detail: s.gated.map((g) => `  · ${g}`).join('\n') + `\n\n  PR: ${s.pr.url}`,
     };
   }
 
-  return { action: ACTION.MERGE, why: `${bar(s)}, current, and ungated` };
+  return { action: ACTION.MERGE, why: `${bar(s, reviewSpent)}, current, and ungated` };
 }
 
 /**
@@ -194,7 +205,10 @@ function decide(s) {
  * would put a review in the log that never happened, and the log is how anyone
  * reconstructs why something merged.
  */
-function bar(s) {
+function bar(s, reviewSpent = false) {
+  if (reviewSpent) {
+    return `green, with the review budget spent (${s.review.rounds}/${s.maxReviewRounds} rounds)`;
+  }
   return s.requireApprovingReview ? 'green and approved' : 'green (no review required here)';
 }
 

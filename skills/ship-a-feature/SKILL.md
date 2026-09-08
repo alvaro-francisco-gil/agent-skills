@@ -86,6 +86,12 @@ A resumable state machine, not a merge command. Run it, act on the exit code, ru
 | `30` | Hard-stop, no reviewer, or rounds exhausted | **Stop.** Hand to the user with the PR link |
 | `40` | Preflight failed | Resolve, re-run |
 
+Exit `20` is a budget, capped at `maxReviewRounds`. What happens at the cap is the repo's
+call, in `roundsExhausted`: `"handoff"` turns it into exit `30`, and `"merge"` ends the
+review conversation and lands the PR on CI green. Under `"merge"` there is nothing left to
+ask the user — do not stop to report that the rounds ran out. Neither setting relaxes the
+hard-stop gate.
+
 On exit `10`, read the failure before assuming it is your code. An infrastructure failure
 — a broken runner cache, a hung service lane — is not a regression to "fix". Inventing a
 code change to satisfy broken infrastructure is the single worst failure mode of this

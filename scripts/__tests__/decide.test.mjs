@@ -15,6 +15,7 @@ const base = () => ({
   baseBranch: 'develop',
   requireApprovingReview: true,
   maxReviewRounds: 5,
+  roundsExhausted: 'handoff',
   branch: {
     name: 'feat/x', headSha: 'abc', isProtected: false, dirty: false, dirtyFiles: '',
     rebaseConflict: false, ahead: 2, pushed: true, remoteBehind: false, inWorktree: true,
@@ -149,6 +150,46 @@ test('changes requested → exit 20 with the findings', () => {
 
 test('rounds exhausted hands off instead of looping', () => {
   const s = withState({ review: { state: 'changes_requested', rounds: 5, body: 'x' } });
+  assert.equal(decide(s).exit, EXIT.NEEDS_HUMAN);
+});
+
+test('roundsExhausted "merge" lands on green once the budget is spent', () => {
+  const s = withState({
+    roundsExhausted: 'merge',
+    review: { state: 'changes_requested', rounds: 3, body: 'still objecting' },
+    maxReviewRounds: 3,
+  });
+  const d = decide(s);
+  assert.equal(d.action, ACTION.MERGE);
+  assert.match(d.why, /budget spent \(3\/3 rounds\)/);
+});
+
+test('roundsExhausted "merge" still spends every round first', () => {
+  const s = withState({
+    roundsExhausted: 'merge',
+    review: { state: 'changes_requested', rounds: 2, body: 'finding' },
+    maxReviewRounds: 3,
+  });
+  assert.equal(decide(s).exit, EXIT.CHANGES_REQUESTED);
+});
+
+test('a spent review budget buys nothing against red CI', () => {
+  const s = withState({
+    roundsExhausted: 'merge',
+    review: { state: 'changes_requested', rounds: 3, body: 'x' },
+    maxReviewRounds: 3,
+    checks: { state: 'red', failures: [{ name: 'Lint', why: 'failure', link: 'https://example/run' }] },
+  });
+  assert.equal(decide(s).exit, EXIT.CI_RED);
+});
+
+test('a spent review budget buys nothing against the hard-stop gate', () => {
+  const s = withState({
+    roundsExhausted: 'merge',
+    review: { state: 'changes_requested', rounds: 3, body: 'x' },
+    maxReviewRounds: 3,
+    gated: ['firestore.rules — Firestore security rules'],
+  });
   assert.equal(decide(s).exit, EXIT.NEEDS_HUMAN);
 });
 

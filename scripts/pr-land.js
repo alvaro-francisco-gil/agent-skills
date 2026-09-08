@@ -11,7 +11,8 @@
  *   0   merged and the remote branch is gone
  *   10  CI red (failures printed) — fix, re-run
  *   20  review requested changes (findings printed) — fix the cause, re-run
- *   30  hard-stop, draft, closed, rounds exhausted, or a deadline — hand to a human
+ *   30  hard-stop, draft, closed, a deadline, or (unless the repo sets
+ *       `roundsExhausted: "merge"`) rounds exhausted — hand to a human
  *   40  preflight failed (dirty tree, protected branch, conflict) — resolve, re-run
  *
  * Why a reconciler. The pipeline version accumulated ten bugs in its first day and
@@ -63,6 +64,8 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "protectedBranches": ["beta", "main"],
 //     "reviewLabel": "ai-review",
 //     "requireApprovingReview": true,
+//     "maxReviewRounds": 5,
+//     "roundsExhausted": "handoff",              // or "merge" — land on green at the cap
 //     "mergeMethod": "merge",                    // or "squash" / "rebase"
 //     "ciPaths": ["src/", "package.json"],       // or ["**"] when CI has no filter
 //     "requiredLanes": ["Emulators · Vitest"],   // skipped == failed for these
@@ -79,6 +82,11 @@ const DEFAULTS = {
   reviewLabel: 'ai-review',
   requireApprovingReview: true,
   maxReviewRounds: 5,
+  // What running the review budget out MEANS here: "handoff" (a human takes the
+  // open findings) or "merge" (the cap ends the review conversation and the PR
+  // lands on CI green alone). See the review section of decide.js — "merge"
+  // never relaxes the hard-stop gate.
+  roundsExhausted: 'handoff',
   // How this repo integrates a PR. A repo whose history is squashed and one
   // whose history keeps merge commits are both correct; which one is a property
   // of the repo, so it is data here rather than a value baked into the loop.
@@ -117,6 +125,11 @@ function loadConfig(repoRoot = process.cwd()) {
   // must not surface: everything up to it has already succeeded.
   if (!['merge', 'squash', 'rebase'].includes(merged.mergeMethod)) {
     throw new Error(`${CONFIG_FILENAME}: mergeMethod must be "merge", "squash" or "rebase" (got ${JSON.stringify(merged.mergeMethod)})`);
+  }
+  // A typo here would silently read as "handoff" — the safe half of the choice,
+  // which is exactly why nobody would notice the repo never adopted the other.
+  if (!['handoff', 'merge'].includes(merged.roundsExhausted)) {
+    throw new Error(`${CONFIG_FILENAME}: roundsExhausted must be "handoff" or "merge" (got ${JSON.stringify(merged.roundsExhausted)})`);
   }
   merged.configFound = fs.existsSync(file);
   return merged;
@@ -367,6 +380,7 @@ function observe(deadlines) {
     baseBranch: CONFIG.baseBranch,
     requireApprovingReview: CONFIG.requireApprovingReview,
     maxReviewRounds: CONFIG.maxReviewRounds,
+    roundsExhausted: CONFIG.roundsExhausted,
     branch: {
       name: branchName,
       headSha,
