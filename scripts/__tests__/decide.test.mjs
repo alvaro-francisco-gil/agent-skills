@@ -20,7 +20,7 @@ const base = () => ({
     name: 'feat/x', headSha: 'abc', isProtected: false, dirty: false, dirtyFiles: '',
     rebaseConflict: false, ahead: 2, pushed: true, remoteBehind: false, inWorktree: true,
   },
-  pr: { number: 7, state: 'open', url: 'https://example/7', isDraft: false, headSha: 'abc', reviews: [] },
+  pr: { number: 7, state: 'open', url: 'https://example/7', isDraft: false, headSha: 'abc', reviews: [], mergeable: 'MERGEABLE' },
   checks: { state: 'green', failures: [] },
   review: { state: 'approved', rounds: 1, body: '' },
   remoteBranchExists: true,
@@ -33,6 +33,58 @@ const base = () => ({
 });
 
 const withState = (patch) => ({ ...base(), ...patch });
+
+// --- a PR that cannot be merged at all --------------------------------------
+//
+// The failure these cover is not "the gate let something through" but "the gate
+// reported the wrong cause": a conflicting PR dispatches no runs, so the checks
+// wait timed out into a confident claim about runner starvation.
+
+test('a conflicting PR is reported as conflicting, not waited on', () => {
+  const s = withState({
+    pr: { ...base().pr, mergeable: 'CONFLICTING' },
+    checks: { state: 'none', failures: [] },
+  });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.PREFLIGHT);
+  assert.match(d.why, /conflicts with develop/);
+  assert.match(d.detail, /git rebase origin\/develop/);
+});
+
+test('a conflicting PR is caught before the checks deadline can misattribute it', () => {
+  const s = withState({
+    pr: { ...base().pr, mergeable: 'CONFLICTING' },
+    checks: { state: 'none', failures: [] },
+    checksDeadlinePassed: true,
+  });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.PREFLIGHT);
+  assert.doesNotMatch(d.detail, /starved of runners/);
+});
+
+test('UNKNOWN mergeability is not a verdict — GitHub computes it lazily', () => {
+  const s = withState({
+    pr: { ...base().pr, mergeable: 'UNKNOWN' },
+    checks: { state: 'pending', failures: [] },
+  });
+  assert.equal(decide(s).action, ACTION.WAIT_CHECKS);
+});
+
+test('a merged PR is terminal even though GitHub reports it UNKNOWN afterwards', () => {
+  const s = withState({
+    pr: { ...base().pr, state: 'merged', mergeable: 'UNKNOWN' },
+    remoteBranchExists: false,
+  });
+  assert.equal(decide(s).exit, EXIT.MERGED);
+});
+
+test('a conflicting PR still reports the conflict rather than a stale approval', () => {
+  const s = withState({
+    pr: { ...base().pr, mergeable: 'CONFLICTING' },
+    checks: { state: 'green', failures: [] },
+  });
+  assert.equal(decide(s).exit, EXIT.PREFLIGHT);
+});
 
 // --- the happy path ---------------------------------------------------------
 

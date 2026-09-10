@@ -232,14 +232,36 @@ function observePr(branch) {
   const list = JSON.parse(raw || '[]').filter((p) => p.baseRefName === CONFIG.baseBranch);
   if (!list.length) return { state: 'none', reviews: [] };
   const p = list[0];
+  const state = String(p.state || '').toLowerCase(); // open | merged | closed
   return {
     number: p.number,
-    state: String(p.state || '').toLowerCase(), // open | merged | closed
+    state,
     url: p.url,
     isDraft: p.isDraft,
     headSha: p.headRefOid,
     reviews: p.reviews || [],
+    // Only an open PR has a mergeability worth asking about, and a merged one
+    // answers UNKNOWN anyway.
+    mergeable: state === 'open' ? observeMergeable(p.number) : 'UNKNOWN',
   };
+}
+
+/**
+ * Can this PR still be merged into its base at all? MERGEABLE | CONFLICTING | UNKNOWN.
+ *
+ * A SECOND call, and it has to be. GitHub computes mergeability lazily, in the
+ * background, and answers UNKNOWN until it has; `gh pr list` mostly does not
+ * trigger that computation while `gh pr view` on one PR does. Measured on a live
+ * conflicting PR: the list query said UNKNOWN and the view said CONFLICTING.
+ * Folding this into the list query would therefore read as "no conflict here"
+ * on exactly the PRs it exists to catch.
+ *
+ * UNKNOWN is returned as UNKNOWN and never as a verdict — see decide().
+ */
+function observeMergeable(number) {
+  const raw = gh(['pr', 'view', String(number), '--json', 'mergeable'], { allowFail: true });
+  if (failed(raw)) return 'UNKNOWN';
+  return JSON.parse(raw || '{}').mergeable || 'UNKNOWN';
 }
 
 // A `gh pr checks` state of SKIPPED is two utterly different facts wearing one

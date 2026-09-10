@@ -101,6 +101,40 @@ function decide(s) {
     };
   }
 
+  // --- can this PR be merged at all? ----------------------------------------
+  // Asked BEFORE the checks are waited on, because a conflicting PR dispatches
+  // no workflow runs whatsoever: `pull_request` jobs check out
+  // refs/pull/<n>/merge, and GitHub cannot build that ref while the merge
+  // conflicts. The checks list therefore stays empty forever, and the wait below
+  // eventually times out into "a lane may be starved of runners" — a specific,
+  // confident, WRONG cause. That message cost an hour of chasing runner capacity
+  // on a PR whose only problem was that its base had moved on.
+  //
+  // Only a DEFINITE conflict counts. Mergeability is computed lazily and reads
+  // UNKNOWN until GitHub has done it, which is the normal answer in the seconds
+  // after a push; treating that as trouble would fail nearly every PR. Unknown
+  // means look again, and the loop does.
+  //
+  // Reported, never repaired. ACTION.REBASE below exists for a base that moved
+  // into a still-mergeable diff; resolving conflicting hunks is judgement about
+  // which side is right, and nothing here can supply that.
+  if (s.pr.mergeable === 'CONFLICTING') {
+    return {
+      exit: EXIT.PREFLIGHT,
+      why: `#${s.pr.number} conflicts with ${s.baseBranch}`,
+      detail: [
+        `  GitHub cannot build the merge commit, so CI will never run and no amount of`,
+        `  waiting will change that.`,
+        '',
+        `    git fetch origin ${s.baseBranch} && git rebase origin/${s.baseBranch}`,
+        '',
+        `  Resolve the conflicts, push with --force-with-lease, then re-run.`,
+        '',
+        `  PR: ${s.pr.url}`,
+      ].join('\n'),
+    };
+  }
+
   // --- verification ---------------------------------------------------------
   // "No CI ran" is never "CI passed". When the diff matches no CI path the
   // checks state stays `none` forever, and that is a legitimate steady state —
@@ -123,7 +157,9 @@ function decide(s) {
       return {
         exit: EXIT.NEEDS_HUMAN,
         why: 'CI never settled within the timeout',
-        detail: 'Investigate the run by hand — a lane may be starved of runners.',
+        detail:
+          'A conflicting PR is already ruled out above, so the run was dispatchable.\n' +
+          '  Investigate by hand — a lane may be starved of runners.',
       };
     }
     return { action: ACTION.WAIT_CHECKS, why: `checks are ${s.checks.state}` };
