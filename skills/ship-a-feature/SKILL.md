@@ -84,13 +84,19 @@ A resumable state machine, not a merge command. Run it, act on the exit code, ru
 | `10` | CI red | Read the log, fix, re-run |
 | `20` | Review requested changes | Fix the **cause**, never silence it, re-run |
 | `30` | Hard-stop, no reviewer, or rounds exhausted | **Stop.** Hand to the user with the PR link |
-| `40` | Preflight failed | Resolve, re-run |
+| `40` | Preflight failed — dirty tree, protected branch, or the PR conflicts with its base | Resolve, re-run |
 
 Exit `20` is a budget, capped at `maxReviewRounds`. What happens at the cap is the repo's
 call, in `roundsExhausted`: `"handoff"` turns it into exit `30`, and `"merge"` ends the
 review conversation and lands the PR on CI green. Under `"merge"` there is nothing left to
 ask the user — do not stop to report that the rounds ran out. Neither setting relaxes the
 hard-stop gate.
+
+A PR that **conflicts with its base** is exit `40`, reported as a conflict. It is worth
+knowing why it is not a timeout: `pull_request` jobs check out `refs/pull/<n>/merge`, and
+GitHub cannot build that ref while the merge conflicts — so a conflicting PR dispatches no
+workflow runs at all, and waiting for CI on one waits forever. Rebase onto the base,
+resolve, push with `--force-with-lease`, re-run.
 
 On exit `10`, read the failure before assuming it is your code. An infrastructure failure
 — a broken runner cache, a hung service lane — is not a regression to "fix". Inventing a
