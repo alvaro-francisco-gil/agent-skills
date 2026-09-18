@@ -59,6 +59,15 @@ git add .gitmodules .agents/_shared .agents/skills scripts/pr-land.js
 Then add `"pr:land": "node scripts/pr-land.js"` to `package.json`, and write
 `.agents/land.config.json` (see below).
 
+### Vendoring `pr-land.js` instead of the submodule
+
+A repo whose production builds clone submodules (Vercel does, during every build) should
+not depend on this personal repository: renaming it or making it private would break that
+repo's deploys. Copy `scripts/pr-land.js` and `scripts/decide.js` (and their
+`__tests__/`) into the repo, e.g. `scripts/pr-land/`, with a header naming the source
+commit, and point `pr:land` at the copy. Update by copying the newer files over and
+re-running the tests. The config file and every rule below apply unchanged.
+
 ### `.agents/land.config.json`
 
 Required in every consuming repo. Defaults **fail closed** — an absent config means an empty
@@ -88,6 +97,8 @@ review gate rather than silently auto-merging something it never declared.
 - `hardStop[].pattern` is a regex *source string*, not `/slashes/`; add `"flags": "i"` if needed.
 - `requireApprovingReview: false` is a **weaker** bar, not an equivalent one. Set it only where
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.
+- With no reviewer bot, also set `"reviewLabel": null`, so the loop does not create a label
+  nothing listens to.
 
 ### Wiring the reviewer: a public repo cannot use the immediate trigger
 
