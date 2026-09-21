@@ -1,14 +1,21 @@
 # agent-skills
 
-Shared, repo-agnostic [agent skills](https://code.claude.com/docs/en/skills) consumed by
-multiple projects as a git submodule, so a single copy is the source of truth.
+The autonomous delivery contract (`ship-a-feature`) and the landing state machine behind
+it (`scripts/pr-land.js`), consumed by multiple projects as a git submodule so a single
+copy is the source of truth.
+
+> **`managing-plans-lifecycle` has moved** to
+> [agent-plans](https://github.com/alvaro-francisco-gil/agent-plans), where it ships as a
+> plugin for Claude Code, Codex, Cursor and Gemini. It left because it is pure convention
+> — folders and `git mv`, no scripts — so it installs anywhere, while `ship-a-feature`
+> needs `pr-land.js`, a `pr:land` npm script and `.agents/land.config.json`, none of which
+> a plugin can install for you. That is why this repo stays a submodule and is no longer a
+> plugin marketplace.
 
 ## What's here
 
 **Skills**
 
-- **managing-plans-lifecycle** — the `docs/plans/{ideas,ready,ongoing[,/soak]}/` →
-  `docs/{decisions,incidents,ops}/` lifecycle, and how it composes with `superpowers`.
 - **ship-a-feature** — the autonomous delivery contract: front-load every question into ONE
   message, take `go` as "all your picks", then implement and land unattended. Supersedes
   `superpowers:brainstorming`'s one-question-per-message rule and
@@ -34,24 +41,20 @@ skill), and each shared skill is symlinked into `.agents/skills/` at depth 1:
 
 ```
 .agents/_shared/                            # this repo, as a submodule
-   skills/managing-plans-lifecycle/SKILL.md
    skills/ship-a-feature/SKILL.md
    scripts/pr-land.js
-.agents/skills/managing-plans-lifecycle  →  ../_shared/skills/managing-plans-lifecycle
 .agents/skills/ship-a-feature            →  ../_shared/skills/ship-a-feature
 .claude/skills                           →  ../.agents/skills
 scripts/pr-land.js                       →  ../.agents/_shared/scripts/pr-land.js
 ```
 
-The `skills/` directory is required by the Claude Code plugin layout (see
-**Two channels** below); submodule consumers just point one level deeper.
+Consumers point one level deeper than the repo root, into `skills/`.
 
 ### Add to a new repo
 
 ```sh
 git submodule add https://github.com/alvaro-francisco-gil/agent-skills.git .agents/_shared
-ln -s ../_shared/skills/managing-plans-lifecycle .agents/skills/managing-plans-lifecycle
-ln -s ../_shared/skills/ship-a-feature           .agents/skills/ship-a-feature
+ln -s ../_shared/skills/ship-a-feature .agents/skills/ship-a-feature
 ln -s ../.agents/_shared/scripts/pr-land.js scripts/pr-land.js
 git add .gitmodules .agents/_shared .agents/skills scripts/pr-land.js
 ```
@@ -130,36 +133,18 @@ git submodule update --remote .agents/_shared
 git add .agents/_shared && git commit -m "chore: bump agent-skills"
 ```
 
-## Two channels — pick one per repo, never both
+## Why a submodule and not a plugin
 
-This repo is both a **git submodule** and a **Claude Code plugin marketplace**. They deliver
-the same skills by different routes, and a repo that uses both loads every skill twice.
+`ship-a-feature` cannot ship as a plugin. Its central step is `pnpm pr:land`, which runs
+`scripts/pr-land.js` and reads `.agents/land.config.json` — a plugin installs skills, not
+npm scripts or repo config, so an installer would get a skill whose main step calls a
+command that does not exist. The submodule carries the script and the skill together, pins
+a SHA per repo, and is visible to CI (`submodules: true`) and to Codex, which reads
+`.agents/skills/` directly.
 
-| | Submodule (primary) | Marketplace plugin |
-|---|---|---|
-| Wiring | `git submodule add` + symlinks | `/plugin marketplace add alvaro-francisco-gil/agent-skills` |
-| Version | **pinned** per repo, visible in `git log` as a gitlink SHA | whatever is installed |
-| Sees `scripts/pr-land.js` | yes, as a repo file `pnpm pr:land` can run | no |
-| Visible to CI | yes, with `submodules: true` on checkout | no |
-| Visible to Codex | yes — it reads `.agents/skills/` | no |
-| Cloud / mobile sessions | yes, the files are in the repo | only via `enabledPlugins` in `.claude/settings.json` |
+`managing-plans-lifecycle` had the opposite shape — folders and `git mv`, nothing to
+install — so it moved to [agent-plans](https://github.com/alvaro-francisco-gil/agent-plans)
+and ships as a plugin there.
 
-**Use the submodule** for any repo with an `AGENTS.md`, a CI pipeline, or Codex wiring — that
-is where pinning, `pr:land`, and cross-tool visibility matter.
-
-**Use the plugin** for small repos that have none of that and just want the intake protocol:
-
-```jsonc
-// .claude/settings.json — makes the skills reach cloud and mobile sessions too
-{
-  "extraKnownMarketplaces": {
-    "alvaro-agent-skills": {
-      "source": { "source": "github", "repo": "alvaro-francisco-gil/agent-skills" }
-    }
-  },
-  "enabledPlugins": ["agent-workflow@alvaro-agent-skills"]
-}
-```
-
-Note that a project-declared plugin from an external source still needs one
-`claude plugin install` per machine before it loads.
+A repo can use both: the submodule for `ship-a-feature`, the plugin for the plans
+lifecycle. They no longer overlap, so nothing loads twice.
