@@ -194,6 +194,17 @@ test('CI that never settles hands off rather than waiting forever', () => {
   assert.match(d.detail, /starved of runners/);
 });
 
+test('a required lane that never reported is named at the deadline, not guessed at', () => {
+  // The likeliest cause is a gate whose paths drifted from its workflow's filter,
+  // so that is what the message points at first.
+  const missing = 'Lint + typecheck + unit (ordago-console)';
+  const s = withState({ checks: { state: 'pending', failures: [], missing: [missing] }, checksDeadlinePassed: true });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.NEEDS_HUMAN);
+  assert.ok(d.detail.includes(missing));
+  assert.match(d.detail, /mirror/);
+});
+
 // --- review -----------------------------------------------------------------
 
 test('changes requested → exit 20 with the findings', () => {

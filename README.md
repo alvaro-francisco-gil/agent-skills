@@ -83,7 +83,14 @@ review gate rather than silently auto-merging something it never declared.
   "reviewLabel": "ai-review",
   "requireApprovingReview": true,
   "mergeMethod": "merge",
-  "ciPaths": ["src/", "functions/", "package.json", "pnpm-lock.yaml"],
+  "ciGates": [
+    {
+      "workflow": "ci.yml",
+      "paths": ["src/", "functions/", "package.json", "pnpm-lock.yaml"],
+      "requiredLanes": ["Lint + Unit"]
+    },
+    { "workflow": "console-ci.yml", "paths": ["apps/console/"], "requiredLanes": ["Console unit"] }
+  ],
   "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
   "integrationCheck": { "command": "pnpm -s typecheck" },
   "hardStop": [
@@ -93,8 +100,21 @@ review gate rather than silently auto-merging something it never declared.
 }
 ```
 
-- `ciPaths` **must mirror the repo's CI path filter.** If they drift, the vacuous-green guard
-  either blocks needlessly or — worse — reads "no run dispatched" as "tests passed".
+- `ciGates` has **one entry per path-filtered CI workflow**, and each entry's `paths` **must
+  mirror that workflow's path filter** (`["**"]` for a workflow with none). If they drift,
+  the vacuous-green guard either blocks needlessly or — worse — reads "no run dispatched" as
+  "tests passed". A diff matching no gate is marked UNVERIFIED and rests on review alone.
+- `requiredLanes` are exact check names (as `gh pr checks` prints them) that must reach
+  SUCCESS: SKIPPED counts as failed, and not-yet-reported counts as pending. They are
+  enforced **only when their own gate matches the diff** — that is why they live per gate.
+  One list for the whole repo would demand workflow A's lane on a diff that only dispatches
+  workflow B, and every such PR would wedge. List only a job that runs whenever its workflow
+  dispatches at all (no job-level `if:`, no `needs:` on a job that can be skipped), or a
+  legitimate skip wedges the PRs it applies to.
+- Why per workflow rather than one `ciPaths` list: with two path-filtered workflows, a diff
+  touching only the second one's paths read as UNVERIFIED and merged on review while that
+  workflow was still running. The legacy top-level `ciPaths` + `requiredLanes` are still
+  accepted and read as a single gate; declaring both shapes is rejected at load.
 - `mergeMethod` is `"merge"`, `"squash"` or `"rebase"` — match whatever the repo's history
   already does, since the loop is not the place to change it. An unrecognised value is
   rejected when the config loads, not at the merge.
@@ -113,9 +133,9 @@ review gate rather than silently auto-merging something it never declared.
   - the **PR** changes a `rebaseRadius` path → `integrationCheck` at scope `wide`;
   - `sharedBlastRadius` changed on either side → `integrationCheck` at scope `shared`.
 
-  "Either side" counts whenever the other side moved anything — not only what `ciPaths`
-  covers, because a consumer with its own workflow sits outside that filter while importing
-  the shared code all the same. The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
+  "Either side" counts whenever the other side moved anything — not only what a `ciGates`
+  entry covers, because a consumer with no gate of its own sits outside every filter while
+  importing the shared code all the same. The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
   (`shared` | `wide`) and decides what each covers; `wide` should reach every workspace a
   `rebaseRadius` path can break. A passing verdict is kept per head and holds while the
   base moves only outside the PR's files and `rebaseRadius` — shared code moves on most
