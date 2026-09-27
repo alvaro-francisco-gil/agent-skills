@@ -307,6 +307,16 @@ test('the integration check judges the MERGE RESULT, and leaves the branch alone
     const common = path.join(root, '.git');
     const v = readIntegrationVerdictFile(integrationVerdictPath(common, head));
     assert.deepEqual([v.ok, v.baseTip, v.scope], [false, brokenTip, 'shared'], 'the last run is recorded with what it judged');
+
+    // The failing step must be what the tail shows, even when an earlier step
+    // wrote its (passing) report to stderr — Jest does.
+    CONFIG.integrationCheck = {
+      command: 'echo "suite passed" >&2; echo "the real failure"; exit 1',
+      timeoutMs: 30_000,
+    };
+    assert.equal(runIntegrationCheck(s(cleanTip)), false);
+    const tail = readIntegrationVerdictFile(integrationVerdictPath(common, head)).output.trim().split('\n');
+    assert.equal(tail.at(-1), 'the real failure');
     assert.equal(execSync('git rev-parse HEAD', { cwd: root }).toString().trim(), head, 'the branch did not move');
     assert.equal(execSync('git status --porcelain', { cwd: root }).toString(), '', 'the checkout is untouched');
     assert.equal(execSync('git worktree list', { cwd: root }).toString().trim().split('\n').length, 1, 'the scratch worktree is reaped');
