@@ -221,20 +221,23 @@ function ciCovers(files, cfg = CONFIG) {
  * What the base's movement since the merge-base means for this PR — the `base`
  * field of the observed state, in exactly the shape decide() reads.
  *
- * Symmetric: a sensitive path counts whichever SIDE changed it. A PR that edits
- * shared code was tested against the consumers as they were when it branched; if
- * the base has since moved a consumer, the merged combination is as unverified as
- * when the base edits shared code under an unchanged PR. The other side only has
- * to have moved something CI covers — a docs-only base move integrates nothing.
+ * The rule every branch below obeys: a REBASE may only be triggered by something
+ * a rebase makes go away. A rebase restarts CI and asks for a fresh review, and
+ * the base moves several times an hour, so a trigger that survives the rebase
+ * turns the landing loop into one that never lands. That is how this function
+ * once made a PR that edits package.json rebase on every base move (6 force-
+ * pushes in 40 minutes, no merge). Everything the PR's OWN diff raises is
+ * therefore answered locally, at the merge gate, by `integrationCheck`.
  *
- * - The same file changed on both sides → rebase. That is where a clean textual
- *   merge most often hides a semantic one, and only the full CI run sees it.
- * - `rebaseRadius` changed on either side → rebase. Those are paths whose
- *   behaviour only the full CI can judge, so no local command stands in for it.
- * - `sharedBlastRadius` changed on either side, nothing above → run the repo's
- *   `integrationCheck` locally against the merge result. A rebase would answer
- *   the same question by re-running every CI lane AND the review, and with N
- *   open PRs every merge would buy N-1 of those.
+ * - Same file changed on both sides → rebase. After it, the overlap is gone.
+ * - The BASE moved `rebaseRadius` → rebase. Paths only the full CI can judge;
+ *   after the rebase the move is part of the tested base.
+ * - The PR changes `rebaseRadius` while the base moved code → integration check
+ *   at scope "wide": the repo's command must cover what those paths reach.
+ * - `sharedBlastRadius` changed on either side while the other moved code →
+ *   integration check at scope "shared". A PR that edits shared code was tested
+ *   against the consumers as they were when it branched, which is exactly as
+ *   unverified as the mirror case.
  * - A repo with no `integrationCheck` rebases where it would have checked.
  *
  * `forced` and `blast` list the triggering files, from whichever side.
@@ -245,17 +248,23 @@ function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const movedCode = (files) => ((cfg.ciPaths || []).length ? ciCovers(files, cfg) : files.length > 0);
   const baseMovedCode = movedCode(baseChangedFiles);
   const prMovedCode = movedCode(prFiles);
-  const eitherSide = (radius) => [
-    ...(prMovedCode ? touches(baseChangedFiles, radius) : []),
-    ...(baseMovedCode ? touches(prFiles, radius) : []),
-  ];
-  const forced = [...new Set(eitherSide(cfg.rebaseRadius || []))];
-  const blast = [...new Set(eitherSide(cfg.sharedBlastRadius))].filter((f) => !forced.includes(f));
+  const radius = cfg.rebaseRadius || [];
+
+  const forced = prMovedCode ? touches(baseChangedFiles, radius) : [];
+  const prWide = baseMovedCode ? touches(prFiles, radius) : [];
+  const blast = [
+    ...new Set([
+      ...(prMovedCode ? touches(baseChangedFiles, cfg.sharedBlastRadius) : []),
+      ...(baseMovedCode ? touches(prFiles, cfg.sharedBlastRadius) : []),
+      ...prWide,
+    ]),
+  ].filter((f) => !forced.includes(f));
   const blastOnly = overlap.length === 0 && forced.length === 0 && blast.length > 0;
   return {
     overlap,
     forced,
     blast,
+    scope: prWide.length > 0 ? 'wide' : 'shared',
     needsRebase: overlap.length > 0 || forced.length > 0 || (blastOnly && !cfg.integrationCheck),
     needsIntegrationCheck: blastOnly && Boolean(cfg.integrationCheck),
   };
@@ -285,25 +294,50 @@ function reviewFor(reviews, headSha) {
 // The integration check's verdict, kept where observe() can read it back.
 //
 // The loop is level-triggered, so the check cannot hand its result to the next
-// decision directly — it writes it down, keyed by the exact pair it judged. A new
-// head or a new base tip is a different pair and simply has no verdict yet.
+// decision directly — it writes it down, per head, with the base tip and scope it
+// judged. The check takes minutes and the base moves every few, so a verdict that
+// died with every base move would starve: a PASS keeps holding while the base
+// moves only through paths it cannot care about.
 // ---------------------------------------------------------------------------
 
-function integrationVerdictPath(commonDir, headSha, baseTip) {
-  return path.join(commonDir, 'pr-land', 'integration', `${headSha}-${baseTip}.json`);
+function integrationVerdictPath(commonDir, headSha) {
+  return path.join(commonDir, 'pr-land', 'integration', `${headSha}.json`);
 }
 
-/** 'pending' | 'pass' | 'fail' for this exact (head, base tip) pair. */
-function readIntegrationVerdict(file) {
-  const pending = { state: 'pending', output: '', verdictFile: file };
-  if (!fs.existsSync(file)) return pending;
+/** The recorded verdict, or null. A torn write from a killed run is no verdict. */
+function readIntegrationVerdictFile(file) {
+  if (!fs.existsSync(file)) return null;
   try {
     const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { state: v.ok ? 'pass' : 'fail', output: String(v.output || ''), verdictFile: file };
+    return typeof v.baseTip === 'string' ? v : null;
   } catch {
-    // A torn write from a killed run is not a verdict either way.
-    return pending;
+    return null;
   }
+}
+
+/**
+ * Does a recorded verdict still answer the question for the base as it is NOW?
+ * Pure. `movedSince` is what the base changed between the verdict's tip and now
+ * (null when that could not be read — no answer, so look again).
+ *
+ * - A narrower verdict never answers a wider question (shared ⊂ wide).
+ * - On the same tip, the verdict stands either way.
+ * - Past it, a PASS holds while nothing moved in the PR's own files or either
+ *   radius; anything else — including an old FAIL, which a new base may fix —
+ *   is re-checked.
+ */
+function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles }, cfg = CONFIG) {
+  const pending = { state: 'pending', output: '' };
+  if (!v) return pending;
+  if (scope === 'wide' && v.scope !== 'wide') return pending;
+  const out = String(v.output || '');
+  if (v.baseTip === baseTip) return { state: v.ok ? 'pass' : 'fail', output: out };
+  if (!v.ok || movedSince === null) return pending;
+  const relevant = [
+    ...movedSince.filter((f) => prFiles.includes(f)),
+    ...touches(movedSince, [...cfg.sharedBlastRadius, ...(cfg.rebaseRadius || [])]),
+  ];
+  return relevant.length ? pending : { state: 'pass', output: out };
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +498,17 @@ function observeChecks(pr, ciWillRun) {
   return checksVerdict(JSON.parse(raw || '[]'), { ciWillRun });
 }
 
+function observeIntegration(commonDir, headSha, baseTip, scope, prFiles) {
+  const verdictFile = integrationVerdictPath(commonDir, headSha);
+  const v = readIntegrationVerdictFile(verdictFile);
+  let movedSince = [];
+  if (v && v.baseTip !== baseTip) {
+    const raw = sh(`git diff --name-only ${v.baseTip} ${baseTip}`, { allowFail: true });
+    movedSince = raw === null ? null : raw.split('\n').filter(Boolean);
+  }
+  return { ...judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles }), verdictFile };
+}
+
 function observe(deadlines) {
   const branchName = sh('git rev-parse --abbrev-ref HEAD');
   const headSha = sh('git rev-parse HEAD');
@@ -520,7 +565,7 @@ function observe(deadlines) {
     base: movement,
     baseTip,
     integration: movement.needsIntegrationCheck
-      ? readIntegrationVerdict(integrationVerdictPath(path.resolve(common || '.git'), headSha, baseTip))
+      ? observeIntegration(path.resolve(common || '.git'), headSha, baseTip, movement.scope, files)
       : { state: 'not-needed', output: '', verdictFile: null },
     checksDeadlinePassed: Date.now() > deadlines.checks,
     reviewDeadlinePassed: Date.now() > deadlines.review,
@@ -556,7 +601,8 @@ function ensureLabel() {
  */
 function runIntegrationCheck(s) {
   const common = path.resolve(sh('git rev-parse --git-common-dir'));
-  const verdictFile = integrationVerdictPath(common, s.branch.headSha, s.baseTip);
+  const verdictFile = integrationVerdictPath(common, s.branch.headSha);
+  const scope = s.base.scope;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-land-integration-'));
   let ok = false;
   let output = '';
@@ -571,6 +617,8 @@ function runIntegrationCheck(s) {
     } else {
       const r = spawnSync(CONFIG.integrationCheck.command, {
         cwd: dir,
+        // "shared" or "wide" — see baseMovement. The command decides what each covers.
+        env: { ...process.env, PR_LAND_INTEGRATION_SCOPE: scope },
         shell: true,
         encoding: 'utf8',
         timeout: CONFIG.integrationCheck.timeoutMs,
@@ -586,7 +634,10 @@ function runIntegrationCheck(s) {
     sh('git worktree prune', { allowFail: true });
   }
   fs.mkdirSync(path.dirname(verdictFile), { recursive: true });
-  fs.writeFileSync(verdictFile, JSON.stringify({ ok, output, command: CONFIG.integrationCheck.command }));
+  fs.writeFileSync(
+    verdictFile,
+    JSON.stringify({ baseTip: s.baseTip, scope, ok, output, command: CONFIG.integrationCheck.command }),
+  );
   return ok;
 }
 
@@ -631,7 +682,7 @@ function act(action, s) {
 
     case ACTION.INTEGRATION_CHECK: {
       if (DRY_RUN) return log(`  [dry-run] would run \`${CONFIG.integrationCheck.command}\` on the merge result`);
-      log(`  running \`${CONFIG.integrationCheck.command}\` on the merge result — minutes, not a CI lane`);
+      log(`  running \`${CONFIG.integrationCheck.command}\` (scope ${s.base.scope}) on the merge result — minutes, not a CI lane`);
       const ok = runIntegrationCheck(s);
       return log(ok ? '  the merge result passes' : '  the merge result FAILS');
     }
@@ -786,6 +837,7 @@ if (require.main === module) {
 module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
-  CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdict, runIntegrationCheck,
+  CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
+  runIntegrationCheck,
   checksVerdict, runIdOf,
 };

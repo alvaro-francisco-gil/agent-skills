@@ -8,7 +8,8 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const {
   hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
-  reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdict, runIntegrationCheck,
+  reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
+  runIntegrationCheck,
 } = require('../pr-land.js');
 import { execSync } from 'node:child_process';
 
@@ -157,6 +158,33 @@ test('staleness is symmetric for rebaseRadius too', () => {
   assert.equal(m.needsRebase, true, 'a dependency change was tested against the old code');
 });
 
+// The livelock this rule exists to prevent. A PR that edits package.json used to
+// rebase on EVERY base move — the trigger was its own diff, which no rebase
+// removes — and on a base that moves faster than CI, it never landed.
+test('LIVELOCK: a PR changing a rebaseRadius path never rebases for it — it is checked wide', () => {
+  const withCheck = {
+    ...cfg,
+    sharedBlastRadius: ['packages/shared/'],
+    rebaseRadius: ['package.json'],
+    integrationCheck: { command: 'true', timeoutMs: 1000 },
+  };
+  const m = baseMovement(['src/A.tsx'], ['package.json', 'functions/index.ts'], withCheck);
+  assert.equal(m.needsRebase, false, 'the trigger is the PR itself; a rebase cannot remove it');
+  assert.equal(m.needsIntegrationCheck, true);
+  assert.equal(m.scope, 'wide');
+});
+
+test('the BASE moving a rebaseRadius path still rebases — and after it, the trigger is gone', () => {
+  const withCheck = { ...cfg, rebaseRadius: ['package.json'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  assert.equal(baseMovement(['package.json'], ['src/A.tsx'], withCheck).needsRebase, true);
+  assert.equal(baseMovement([], ['src/A.tsx'], withCheck).needsRebase, false, 'post-rebase: nothing moved');
+});
+
+test('a shared-only move is checked at scope "shared"', () => {
+  const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  assert.equal(baseMovement(['packages/shared/x.ts'], ['src/A.tsx'], withCheck).scope, 'shared');
+});
+
 test('staleness: the other side must have moved code — a docs-only base integrates nothing', () => {
   const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['pnpm-lock.yaml'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
   const m = baseMovement(['docs/x.md'], ['packages/shared/x.ts', 'pnpm-lock.yaml'], withCheck);
@@ -193,16 +221,50 @@ test('a carried approval binds to its head but is not a round', () => {
 
 // --- the integration check's recorded verdict ---------------------------------
 
-test('an integration verdict is keyed by the exact (head, base tip) pair', () => {
+// --- the integration check's recorded verdict ---------------------------------
+
+const vcfg = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['package.json'] };
+const judge = (v, over = {}) =>
+  judgeIntegrationVerdict(v, { baseTip: 't2', scope: 'shared', movedSince: [], prFiles: ['src/A.tsx'], ...over }, vcfg);
+
+test('verdict: none recorded, or unreadable, is pending', () => {
+  assert.equal(judge(null).state, 'pending');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-verdict-'));
-  const file = integrationVerdictPath(dir, 'head1', 'base1');
-  assert.equal(readIntegrationVerdict(file).state, 'pending');
-  assert.notEqual(file, integrationVerdictPath(dir, 'head1', 'base2'), 'a new base tip is a new question');
+  const file = integrationVerdictPath(dir, 'head1');
+  assert.equal(readIntegrationVerdictFile(file), null);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ ok: false, output: 'TS2339' }));
-  assert.deepEqual(readIntegrationVerdict(file), { state: 'fail', output: 'TS2339', verdictFile: file });
   fs.writeFileSync(file, '{"ok": tr');
-  assert.equal(readIntegrationVerdict(file).state, 'pending', 'a torn write is not a verdict');
+  assert.equal(readIntegrationVerdictFile(file), null, 'a torn write is not a verdict');
+});
+
+test('verdict: on the same tip it stands, pass or fail', () => {
+  assert.equal(judge({ baseTip: 't2', scope: 'shared', ok: true }).state, 'pass');
+  const f = judge({ baseTip: 't2', scope: 'shared', ok: false, output: 'TS2339' });
+  assert.deepEqual([f.state, f.output], ['fail', 'TS2339']);
+});
+
+// The starvation this exists to prevent: the check takes minutes, the base moves
+// every few, and a verdict keyed by the exact tip would be re-run forever.
+test('verdict: a PASS survives base moves that cannot matter to it', () => {
+  const v = { baseTip: 't1', scope: 'shared', ok: true };
+  assert.equal(judge(v, { movedSince: ['docs/x.md', 'apps/other/B.tsx'] }).state, 'pass');
+});
+
+test('verdict: a PASS is re-checked when the base moved the PR files or a radius', () => {
+  const v = { baseTip: 't1', scope: 'shared', ok: true };
+  assert.equal(judge(v, { movedSince: ['src/A.tsx'] }).state, 'pending', "the PR's own file");
+  assert.equal(judge(v, { movedSince: ['packages/shared/x.ts'] }).state, 'pending', 'shared radius');
+  assert.equal(judge(v, { movedSince: ['package.json'] }).state, 'pending', 'rebase radius');
+  assert.equal(judge(v, { movedSince: null }).state, 'pending', 'an unreadable move is no answer');
+});
+
+test('verdict: an old FAIL is re-checked on a new tip — the base may have fixed it', () => {
+  assert.equal(judge({ baseTip: 't1', scope: 'shared', ok: false }, { movedSince: ['docs/x.md'] }).state, 'pending');
+});
+
+test('verdict: a shared-scope PASS never answers a wide question', () => {
+  assert.equal(judge({ baseTip: 't2', scope: 'shared', ok: true }, { scope: 'wide' }).state, 'pending');
+  assert.equal(judge({ baseTip: 't2', scope: 'wide', ok: true }, { scope: 'shared' }).state, 'pass');
 });
 
 /**
@@ -234,15 +296,17 @@ test('the integration check judges the MERGE RESULT, and leaves the branch alone
   const { root, head, cleanTip, brokenTip } = repoWithSemanticBreak();
   const cwd = process.cwd();
   const saved = CONFIG.integrationCheck;
-  CONFIG.integrationCheck = { command: 'node use.js', timeoutMs: 30_000 };
+  // The scope reaches the command, so a repo can widen what it runs.
+  CONFIG.integrationCheck = { command: 'test "$PR_LAND_INTEGRATION_SCOPE" = shared && node use.js', timeoutMs: 30_000 };
   try {
     process.chdir(root);
-    const s = (baseTip) => ({ branch: { headSha: head }, baseTip });
+    const s = (baseTip) => ({ branch: { headSha: head }, baseTip, base: { scope: 'shared' } });
     assert.equal(runIntegrationCheck(s(cleanTip)), true);
     assert.equal(runIntegrationCheck(s(brokenTip)), false, 'the rename breaks the caller only once merged');
 
     const common = path.join(root, '.git');
-    assert.equal(readIntegrationVerdict(integrationVerdictPath(common, head, brokenTip)).state, 'fail');
+    const v = readIntegrationVerdictFile(integrationVerdictPath(common, head));
+    assert.deepEqual([v.ok, v.baseTip, v.scope], [false, brokenTip, 'shared'], 'the last run is recorded with what it judged');
     assert.equal(execSync('git rev-parse HEAD', { cwd: root }).toString().trim(), head, 'the branch did not move');
     assert.equal(execSync('git status --porcelain', { cwd: root }).toString(), '', 'the checkout is untouched');
     assert.equal(execSync('git worktree list', { cwd: root }).toString().trim().split('\n').length, 1, 'the scratch worktree is reaped');
