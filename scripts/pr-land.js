@@ -221,20 +221,36 @@ function ciCovers(files, cfg = CONFIG) {
  * What the base's movement since the merge-base means for this PR — the `base`
  * field of the observed state, in exactly the shape decide() reads.
  *
+ * Symmetric: a sensitive path counts whichever SIDE changed it. A PR that edits
+ * shared code was tested against the consumers as they were when it branched; if
+ * the base has since moved a consumer, the merged combination is as unverified as
+ * when the base edits shared code under an unchanged PR. The other side only has
+ * to have moved something CI covers — a docs-only base move integrates nothing.
+ *
  * - The same file changed on both sides → rebase. That is where a clean textual
  *   merge most often hides a semantic one, and only the full CI run sees it.
- * - The base moved through `rebaseRadius` → rebase. Those are paths whose
+ * - `rebaseRadius` changed on either side → rebase. Those are paths whose
  *   behaviour only the full CI can judge, so no local command stands in for it.
- * - The base moved only through the shared blast radius → run the repo's
+ * - `sharedBlastRadius` changed on either side, nothing above → run the repo's
  *   `integrationCheck` locally against the merge result. A rebase would answer
  *   the same question by re-running every CI lane AND the review, and with N
  *   open PRs every merge would buy N-1 of those.
- * - A repo with no `integrationCheck` keeps rebasing on a blast-radius move.
+ * - A repo with no `integrationCheck` rebases where it would have checked.
+ *
+ * `forced` and `blast` list the triggering files, from whichever side.
  */
 function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const overlap = baseChangedFiles.filter((f) => prFiles.includes(f));
-  const forced = touches(baseChangedFiles, cfg.rebaseRadius || []);
-  const blast = touches(baseChangedFiles, cfg.sharedBlastRadius).filter((f) => !forced.includes(f));
+  // With no CI path map there is no telling code from prose, so any change counts.
+  const movedCode = (files) => ((cfg.ciPaths || []).length ? ciCovers(files, cfg) : files.length > 0);
+  const baseMovedCode = movedCode(baseChangedFiles);
+  const prMovedCode = movedCode(prFiles);
+  const eitherSide = (radius) => [
+    ...(prMovedCode ? touches(baseChangedFiles, radius) : []),
+    ...(baseMovedCode ? touches(prFiles, radius) : []),
+  ];
+  const forced = [...new Set(eitherSide(cfg.rebaseRadius || []))];
+  const blast = [...new Set(eitherSide(cfg.sharedBlastRadius))].filter((f) => !forced.includes(f));
   const blastOnly = overlap.length === 0 && forced.length === 0 && blast.length > 0;
   return {
     overlap,

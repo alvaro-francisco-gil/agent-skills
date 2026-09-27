@@ -141,6 +141,34 @@ test('staleness: a rebaseRadius move rebases even when a local check is configur
   assert.equal(shared.needsIntegrationCheck, true);
 });
 
+// The direction a base-only rule cannot see: the PR edits the shared code, the
+// base edits its consumer. The PR's CI tested the new shared code against the OLD
+// consumer, so the merged pair is exactly as unverified as the mirror case.
+test('staleness is symmetric: a PR changing shared code is checked when the base moved a consumer', () => {
+  const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  const m = baseMovement(['functions/index.ts'], ['packages/shared/x.ts'], withCheck);
+  assert.equal(m.needsIntegrationCheck, true);
+  assert.deepEqual(m.blast, ['packages/shared/x.ts']);
+});
+
+test('staleness is symmetric for rebaseRadius too', () => {
+  const withRadius = { ...cfg, rebaseRadius: ['pnpm-lock.yaml'] };
+  const m = baseMovement(['src/A.tsx'], ['pnpm-lock.yaml'], withRadius);
+  assert.equal(m.needsRebase, true, 'a dependency change was tested against the old code');
+});
+
+test('staleness: the other side must have moved code — a docs-only base integrates nothing', () => {
+  const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['pnpm-lock.yaml'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  const m = baseMovement(['docs/x.md'], ['packages/shared/x.ts', 'pnpm-lock.yaml'], withCheck);
+  assert.equal(m.needsRebase, false);
+  assert.equal(m.needsIntegrationCheck, false);
+});
+
+test('staleness: with no ciPaths declared, any change on the other side counts', () => {
+  const bare = { ...loadConfig('/nonexistent'), sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  assert.equal(baseMovement(['docs/x.md'], ['packages/shared/x.ts'], bare).needsIntegrationCheck, true);
+});
+
 test('integrationCheck defaults off, and a malformed one is rejected at load', () => {
   assert.equal(DEFAULTS.integrationCheck, null);
   assert.throws(() => loadConfig(repoWithConfig({ integrationCheck: 'pnpm tsc' })), /integrationCheck/);

@@ -97,6 +97,9 @@ review gate rather than silently auto-merging something it never declared.
   is green and approved. Keep it to what a shared-code move can break without touching the
   PR's files — typecheck and fast unit tests, not the full suite. A change to the *same
   file* on both sides still rebases.
+- Both radii are **symmetric**: a path counts whichever side changed it, as long as the other
+  side moved something `ciPaths` covers. A PR that edits shared code was tested against the
+  consumers as they were when it branched, which is exactly as unverified as the mirror case.
 - `rebaseRadius` names paths whose movement only the full CI can judge — security rules,
   anything whose behaviour lives in an emulator. A move there always rebases, even with an
   `integrationCheck`; keep them out of what the local command is trusted with.
