@@ -238,6 +238,18 @@ function decide(s) {
     return { action: ACTION.WAIT_REVIEW, why: 'waiting for an approving review on this commit' };
   }
 
+  // --- the gate that green cannot answer ------------------------------------
+  // Before the integration check: a gated PR is handed to a human whatever that
+  // check says, so running it first only spends up to its whole timeout for
+  // nothing — a PR touching the rules files would run the widest scope of all.
+  if (s.gated.length) {
+    return {
+      exit: EXIT.NEEDS_HUMAN,
+      why: `${bar(s, reviewSpent)}, but this PR is gated — a human merges it`,
+      detail: s.gated.map((g) => `  · ${g}`).join('\n') + `\n\n  PR: ${s.pr.url}`,
+    };
+  }
+
   // --- integration ----------------------------------------------------------
   // Semantic, not chronological. A branch whose paths do not intersect what the
   // base changed is still validly green; re-running CI for it buys nothing and
@@ -266,15 +278,6 @@ function decide(s) {
         ].join('\n'),
       };
     }
-  }
-
-  // --- the gate that green cannot answer ------------------------------------
-  if (s.gated.length) {
-    return {
-      exit: EXIT.NEEDS_HUMAN,
-      why: `${bar(s, reviewSpent)}, but this PR is gated — a human merges it`,
-      detail: s.gated.map((g) => `  · ${g}`).join('\n') + `\n\n  PR: ${s.pr.url}`,
-    };
   }
 
   return { action: ACTION.MERGE, why: `${bar(s, reviewSpent)}, current, and ungated` };

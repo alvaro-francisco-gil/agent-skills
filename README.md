@@ -108,8 +108,12 @@ review gate rather than silently auto-merging something it never declared.
   with no `ciPaths`). The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
   (`shared` | `wide`) and decides what each covers; `wide` should reach every workspace a
   `rebaseRadius` path can break. A passing verdict is kept per head and holds while the
-  base moves only through paths outside the PR's files and both radii, so a check that
-  takes minutes cannot be starved by a base that moves every few.
+  base moves only outside the PR's files and `rebaseRadius` — shared code moves on most
+  merges, and voiding the verdict for it would starve any check longer than the gap
+  between them; a shared move that lands mid-check is left to the base's own post-merge
+  CI. A hard-stopped PR is handed over before the check runs.
+- With no `integrationCheck`, only the **base** side rebases; the PR's own side of a radius
+  is not verified before the merge at all, because a rebase cannot remove that trigger.
 - A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the
   reviewer re-posted onto a new head with an identical diff (a clean rebase). It counts as
   an approval and not as a round.
