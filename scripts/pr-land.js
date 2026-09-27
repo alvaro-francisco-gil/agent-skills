@@ -9,7 +9,7 @@
  * was.
  *
  *   0   merged and the remote branch is gone
- *   10  CI red (failures printed) — fix, re-run
+ *   10  CI red, or the merge result fails `integrationCheck` (output printed) — fix, re-run
  *   20  review requested changes (findings printed) — fix the cause, re-run
  *   30  hard-stop, draft, closed, a deadline, or (unless the repo sets
  *       `roundsExhausted: "merge"`) rounds exhausted — hand to a human
@@ -35,8 +35,11 @@
  * - **Vacuous green is not green.** CI is usually path-filtered, so a PR touching
  *   only docs or infra dispatches no run at all. Such a PR is marked UNVERIFIED in
  *   its body and rests on review alone.
- * - **Staleness is semantic, not chronological.** Rebase only when the base's
- *   changed paths actually intersect this PR's, or touch a shared blast radius.
+ * - **Staleness is semantic, not chronological.** Rebase only when the base
+ *   changed a file this PR also changes, and do it before any wait rather than
+ *   after green + approved. A base that moved only through the shared blast
+ *   radius is answered by `integrationCheck` on the merge result, locally — see
+ *   `baseMovement`.
  * - **A lane that never ran is not a lane that passed.** GitHub reports "skipped
  *   by a path filter" and "skipped because my dependency died" with the same
  *   word, and only the second can merge an unvalidated diff. See `checksVerdict`.
@@ -47,8 +50,9 @@
  */
 'use strict';
 
-const { execFileSync, execSync } = require('node:child_process');
+const { execFileSync, execSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { decide, EXIT, ACTION } = require('./decide.js');
 
@@ -70,7 +74,8 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "ciPaths": ["src/", "package.json"],       // or ["**"] when CI has no filter
 //     "requiredLanes": ["Emulators · Vitest"],   // skipped == failed for these
 //     "hardStop": [{ "pattern": "^firestore\\.rules$", "why": "security rules" }],
-//     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"]
+//     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
+//     "integrationCheck": { "command": "pnpm -s typecheck", "timeoutMs": 900000 }
 //   }
 //
 // `pattern` is a JS regex SOURCE string (not /slashes/); add "flags" for /i.
@@ -98,6 +103,10 @@ const DEFAULTS = {
   hardStop: [],
   hardStopTrailerSource: '^Breaking-Client:',
   sharedBlastRadius: [],
+  // A local command run against the MERGE RESULT (base tip + this head) when the
+  // base moved only through `sharedBlastRadius`. null keeps the old answer to
+  // such a move — a rebase, which re-runs every CI lane and the review.
+  integrationCheck: null,
   pollIntervalMs: 20_000,
   checksTimeoutMs: 90 * 60 * 1000,
   reviewTimeoutMs: 20 * 60 * 1000,
@@ -130,6 +139,13 @@ function loadConfig(repoRoot = process.cwd()) {
   // which is exactly why nobody would notice the repo never adopted the other.
   if (!['handoff', 'merge'].includes(merged.roundsExhausted)) {
     throw new Error(`${CONFIG_FILENAME}: roundsExhausted must be "handoff" or "merge" (got ${JSON.stringify(merged.roundsExhausted)})`);
+  }
+  if (merged.integrationCheck !== null) {
+    const ic = merged.integrationCheck;
+    if (!ic || typeof ic.command !== 'string' || !ic.command.trim()) {
+      throw new Error(`${CONFIG_FILENAME}: integrationCheck must be null or { "command": "<shell command>" }`);
+    }
+    merged.integrationCheck = { timeoutMs: 15 * 60 * 1000, ...ic };
   }
   merged.configFound = fs.existsSync(file);
   return merged;
@@ -196,22 +212,73 @@ function ciCovers(files, cfg = CONFIG) {
   return touches(files, cfg.ciPaths).length > 0;
 }
 
-function needsRebase(baseChangedFiles, prFiles, cfg = CONFIG) {
+/**
+ * What the base's movement since the merge-base means for this PR — the `base`
+ * field of the observed state, in exactly the shape decide() reads.
+ *
+ * - The same file changed on both sides → rebase. That is where a clean textual
+ *   merge most often hides a semantic one, and only the full CI run sees it.
+ * - The base moved only through the shared blast radius → run the repo's
+ *   `integrationCheck` locally against the merge result. A rebase would answer
+ *   the same question by re-running every CI lane AND the review, and with N
+ *   open PRs every merge would buy N-1 of those.
+ * - A repo with no `integrationCheck` keeps rebasing on a blast-radius move.
+ */
+function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const overlap = baseChangedFiles.filter((f) => prFiles.includes(f));
   const blast = touches(baseChangedFiles, cfg.sharedBlastRadius);
-  return { overlap, blast, rebase: overlap.length > 0 || blast.length > 0 };
+  const blastOnly = overlap.length === 0 && blast.length > 0;
+  return {
+    overlap,
+    blast,
+    needsRebase: overlap.length > 0 || (blastOnly && !cfg.integrationCheck),
+    needsIntegrationCheck: blastOnly && Boolean(cfg.integrationCheck),
+  };
 }
+
+/**
+ * Opens the body of a review that re-posts an earlier APPROVE onto a new head
+ * whose diff is byte-identical (a clean rebase). The reviewer writes it; it read
+ * nothing, so it is not a round. Must match github-review's CARRIED_REVIEW_MARKER.
+ */
+const CARRIED_REVIEW_MARKER = '<!-- ai-review:carried-approval -->';
 
 /** Reviews bound to THIS commit — an approval of an older head is not an approval. */
 function reviewFor(reviews, headSha) {
   const all = reviews || [];
+  const rounds = all.filter((r) => !String(r.body || '').startsWith(CARRIED_REVIEW_MARKER)).length;
   const mine = all.filter((r) => (r.commit?.oid || r.commit_id) === headSha);
   const changes = mine.filter((r) => r.state === 'CHANGES_REQUESTED');
   if (changes.length) {
-    return { state: 'changes_requested', rounds: all.length, body: changes.map((r) => r.body).join('\n---\n') };
+    return { state: 'changes_requested', rounds, body: changes.map((r) => r.body).join('\n---\n') };
   }
-  if (mine.some((r) => r.state === 'APPROVED')) return { state: 'approved', rounds: all.length, body: '' };
-  return { state: 'none', rounds: all.length, body: '' };
+  if (mine.some((r) => r.state === 'APPROVED')) return { state: 'approved', rounds, body: '' };
+  return { state: 'none', rounds, body: '' };
+}
+
+// ---------------------------------------------------------------------------
+// The integration check's verdict, kept where observe() can read it back.
+//
+// The loop is level-triggered, so the check cannot hand its result to the next
+// decision directly — it writes it down, keyed by the exact pair it judged. A new
+// head or a new base tip is a different pair and simply has no verdict yet.
+// ---------------------------------------------------------------------------
+
+function integrationVerdictPath(commonDir, headSha, baseTip) {
+  return path.join(commonDir, 'pr-land', 'integration', `${headSha}-${baseTip}.json`);
+}
+
+/** 'pending' | 'pass' | 'fail' for this exact (head, base tip) pair. */
+function readIntegrationVerdict(file) {
+  const pending = { state: 'pending', output: '', verdictFile: file };
+  if (!fs.existsSync(file)) return pending;
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { state: v.ok ? 'pass' : 'fail', output: String(v.output || ''), verdictFile: file };
+  } catch {
+    // A torn write from a killed run is not a verdict either way.
+    return pending;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +464,7 @@ function observe(deadlines) {
 
   const gitDir = sh('git rev-parse --git-dir', { allowFail: true }) || '';
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
+  const movement = baseMovement(baseChanged, files);
 
   return {
     baseBranch: CONFIG.baseBranch,
@@ -424,7 +492,11 @@ function observe(deadlines) {
     files,
     ciWillRun,
     gated: hardStopHits(files, sh(`git log origin/${CONFIG.baseBranch}..HEAD --format=%B`, { allowFail: true }) || ''),
-    base: needsRebase(baseChanged, files),
+    base: movement,
+    baseTip,
+    integration: movement.needsIntegrationCheck
+      ? readIntegrationVerdict(integrationVerdictPath(path.resolve(common || '.git'), headSha, baseTip))
+      : { state: 'not-needed', output: '', verdictFile: null },
     checksDeadlinePassed: Date.now() > deadlines.checks,
     reviewDeadlinePassed: Date.now() > deadlines.review,
   };
@@ -446,6 +518,51 @@ function ensureLabel() {
     return null;
   }
   return CONFIG.reviewLabel;
+}
+
+/**
+ * Builds the merge result (base tip + this head) in a throwaway worktree, runs the
+ * repo's integrationCheck there, and records the verdict for observe() to read.
+ *
+ * A worktree, not the current checkout: the branch must stay exactly what was
+ * reviewed, and the merge commit made here is never pushed — GitHub makes the
+ * real one. Reaped with rm + prune, never `worktree remove --force`, because a
+ * repo with a submodule makes the refusal routine (see reportReap).
+ */
+function runIntegrationCheck(s) {
+  const common = path.resolve(sh('git rev-parse --git-common-dir'));
+  const verdictFile = integrationVerdictPath(common, s.branch.headSha, s.baseTip);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-land-integration-'));
+  let ok = false;
+  let output = '';
+  try {
+    sh(`git worktree add --detach "${dir}" ${s.baseTip}`);
+    const merged = sh(
+      `git -C "${dir}" -c user.name=pr-land -c user.email=pr-land@localhost merge --no-ff --no-edit ${s.branch.headSha}`,
+      { allowFail: true },
+    );
+    if (merged === null) {
+      output = `${s.branch.headSha.slice(0, 12)} does not merge cleanly onto ${s.baseTip.slice(0, 12)}.`;
+    } else {
+      const r = spawnSync(CONFIG.integrationCheck.command, {
+        cwd: dir,
+        shell: true,
+        encoding: 'utf8',
+        timeout: CONFIG.integrationCheck.timeoutMs,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      ok = r.status === 0;
+      output = `${r.stdout || ''}${r.stderr || ''}`.split('\n').slice(-60).join('\n');
+      if (r.error) output += `\n${r.error.message}`;
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    sh('git worktree prune', { allowFail: true });
+  }
+  fs.mkdirSync(path.dirname(verdictFile), { recursive: true });
+  fs.writeFileSync(verdictFile, JSON.stringify({ ok, output, command: CONFIG.integrationCheck.command }));
+  return ok;
 }
 
 function act(action, s) {
@@ -485,6 +602,13 @@ function act(action, s) {
       }
       sh(`git push --force-with-lease origin ${s.branch.name}`);
       return log('  rebased and pushed — CI and review re-run against the new head');
+    }
+
+    case ACTION.INTEGRATION_CHECK: {
+      if (DRY_RUN) return log(`  [dry-run] would run \`${CONFIG.integrationCheck.command}\` on the merge result`);
+      log(`  running \`${CONFIG.integrationCheck.command}\` on the merge result — minutes, not a CI lane`);
+      const ok = runIntegrationCheck(s);
+      return log(ok ? '  the merge result passes' : '  the merge result FAILS');
     }
 
     case ACTION.MERGE:
@@ -636,6 +760,7 @@ if (require.main === module) {
 
 module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
-  loadConfig, decide, hardStopHits, ciCovers, needsRebase, touches, reviewFor,
+  loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
+  CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdict, runIntegrationCheck,
   checksVerdict, runIdOf,
 };

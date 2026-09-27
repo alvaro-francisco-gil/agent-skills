@@ -29,6 +29,7 @@ const ACTION = {
   WAIT_CHECKS: 'wait-checks',
   WAIT_REVIEW: 'wait-review',
   REBASE: 'rebase',
+  INTEGRATION_CHECK: 'integration-check',
   MERGE: 'merge',
   DELETE_REMOTE: 'delete-remote-branch',
 };
@@ -152,18 +153,6 @@ function decide(s) {
         '  runner cache, a starved lane — is not a regression to "fix".',
     };
   }
-  if (s.ciWillRun && (s.checks.state === 'none' || s.checks.state === 'pending')) {
-    if (s.checksDeadlinePassed) {
-      return {
-        exit: EXIT.NEEDS_HUMAN,
-        why: 'CI never settled within the timeout',
-        detail:
-          'A conflicting PR is already ruled out above, so the run was dispatchable.\n' +
-          '  Investigate by hand — a lane may be starved of runners.',
-      };
-    }
-    return { action: ACTION.WAIT_CHECKS, why: `checks are ${s.checks.state}` };
-  }
 
   // --- review ---------------------------------------------------------------
   // The cap is a budget, and each repo declares what running out of it MEANS.
@@ -177,6 +166,11 @@ function decide(s) {
   //               however many rounds were spent.
   const reviewSpent = s.roundsExhausted === 'merge' && s.review.rounds >= s.maxReviewRounds;
 
+  // Findings are reported as soon as they land, WITHOUT waiting for CI. The
+  // reviewer is triggered by the fast lanes, so its findings usually arrive while
+  // the heavy lane is still queued: the fix push cancels that run for free, where
+  // waiting for it first would spend the scarcest lane on a head already known
+  // to be superseded.
   if (!reviewSpent && s.review.state === 'changes_requested') {
     if (s.review.rounds >= s.maxReviewRounds) {
       return {
@@ -191,6 +185,38 @@ function decide(s) {
       detail: `${s.review.body}\n\n  Fix the cause, not the symptom. Do not silence the finding.`,
     };
   }
+
+  // --- a base that moved into this diff --------------------------------------
+  // Asked BEFORE any wait, not after the PR is green and approved. File overlap
+  // with the base only grows until the branch is rebased, so a PR that needs a
+  // rebase now will still need it at the merge — and rebasing there throws away
+  // a finished CI run (often hours of queue on the heavy lane) and the review
+  // bound to the old head. Rebasing now cancels a run that is usually still
+  // queued. After the red-CI and changes-requested exits, so a PR with work
+  // outstanding goes back to its author first: rebasing it now would buy a
+  // review of a head that is about to change anyway.
+  if (s.base.needsRebase) {
+    return {
+      action: ACTION.REBASE,
+      why: `the base moved into this diff (${s.base.overlap.length} overlapping, ${s.base.blast.length} shared)`,
+    };
+  }
+
+  // --- verification, continued ---------------------------------------------
+  if (s.ciWillRun && (s.checks.state === 'none' || s.checks.state === 'pending')) {
+    if (s.checksDeadlinePassed) {
+      return {
+        exit: EXIT.NEEDS_HUMAN,
+        why: 'CI never settled within the timeout',
+        detail:
+          'A conflicting PR is already ruled out above, so the run was dispatchable.\n' +
+          '  Investigate by hand — a lane may be starved of runners.',
+      };
+    }
+    return { action: ACTION.WAIT_CHECKS, why: `checks are ${s.checks.state}` };
+  }
+
+  // --- review, continued -----------------------------------------------------
   if (!reviewSpent && s.requireApprovingReview && s.review.state !== 'approved') {
     if (s.reviewDeadlinePassed) {
       return {
@@ -215,12 +241,31 @@ function decide(s) {
   // --- integration ----------------------------------------------------------
   // Semantic, not chronological. A branch whose paths do not intersect what the
   // base changed is still validly green; re-running CI for it buys nothing and
-  // costs the scarcest lane on the host.
-  if (s.base.needsRebase) {
-    return {
-      action: ACTION.REBASE,
-      why: `the base moved into this diff (${s.base.overlap.length} overlapping, ${s.base.blast.length} shared)`,
-    };
+  // costs the scarcest lane on the host. A move through the shared blast radius
+  // is answered locally, on the merge result, and only once everything else is
+  // settled — the base keeps moving, and the last look is the one that counts.
+  if (s.base.needsIntegrationCheck) {
+    if (s.integration.state === 'pending') {
+      return {
+        action: ACTION.INTEGRATION_CHECK,
+        why: `the base moved through the shared blast radius (${s.base.blast.length} files) — checking the merge result`,
+      };
+    }
+    if (s.integration.state === 'fail') {
+      return {
+        exit: EXIT.CI_RED,
+        why: `this PR does not integrate with ${s.baseBranch} as it is now`,
+        detail: [
+          s.integration.output,
+          '',
+          `  The base moved through shared code under this PR. Rebase, fix, and push:`,
+          `    git fetch origin ${s.baseBranch} && git rebase origin/${s.baseBranch}`,
+          '',
+          `  If the output above is an infrastructure failure rather than your code, delete the`,
+          `  verdict and re-run: ${s.integration.verdictFile}`,
+        ].join('\n'),
+      };
+    }
   }
 
   // --- the gate that green cannot answer ------------------------------------

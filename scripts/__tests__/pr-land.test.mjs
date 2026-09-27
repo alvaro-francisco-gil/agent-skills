@@ -6,7 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { hardStopHits, ciCovers, needsRebase, loadConfig, DEFAULTS, EXIT } = require('../pr-land.js');
+const {
+  hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
+  reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdict, runIntegrationCheck,
+} = require('../pr-land.js');
+import { execSync } from 'node:child_process';
 
 // These three predicates decide whether a PR may merge without a human, so they
 // are asserted rather than smoke-tested: a false negative auto-merges a security
@@ -88,20 +92,119 @@ test('vacuous green: an unconfigured repo reports NO coverage, never silent gree
 });
 
 test('staleness: a base move that misses this diff does not force a rebase', () => {
-  assert.equal(needsRebase(['src/A.tsx'], ['functions/index.ts'], cfg).rebase, false);
+  const m = baseMovement(['src/A.tsx'], ['functions/index.ts'], cfg);
+  assert.equal(m.needsRebase, false);
+  assert.equal(m.needsIntegrationCheck, false);
 });
 
 test('staleness: direct file overlap forces a rebase', () => {
-  const r = needsRebase(['functions/index.ts'], ['functions/index.ts'], cfg);
-  assert.equal(r.rebase, true);
-  assert.deepEqual(r.overlap, ['functions/index.ts']);
+  const m = baseMovement(['functions/index.ts'], ['functions/index.ts'], cfg);
+  assert.equal(m.needsRebase, true);
+  assert.deepEqual(m.overlap, ['functions/index.ts']);
 });
 
-test('staleness: shared blast radius forces a rebase without file overlap', () => {
-  const r = needsRebase(['pnpm-lock.yaml'], ['src/A.tsx'], cfg);
-  assert.equal(r.rebase, true);
-  assert.deepEqual(r.overlap, []);
-  assert.deepEqual(r.blast, ['pnpm-lock.yaml']);
+test('staleness: without an integrationCheck, a blast-radius move still rebases', () => {
+  const m = baseMovement(['pnpm-lock.yaml'], ['src/A.tsx'], cfg);
+  assert.equal(m.needsRebase, true);
+  assert.equal(m.needsIntegrationCheck, false);
+  assert.deepEqual(m.blast, ['pnpm-lock.yaml']);
+});
+
+test('staleness: with an integrationCheck, a blast-only move is checked locally instead', () => {
+  const withCheck = { ...cfg, integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  const m = baseMovement(['packages/shared/src/x.ts'], ['src/A.tsx'], withCheck);
+  assert.equal(m.needsRebase, false);
+  assert.equal(m.needsIntegrationCheck, true);
+});
+
+test('staleness: overlap wins over the local check — the same file on both sides rebases', () => {
+  const withCheck = { ...cfg, integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  const m = baseMovement(['packages/shared/src/x.ts'], ['packages/shared/src/x.ts'], withCheck);
+  assert.equal(m.needsRebase, true);
+  assert.equal(m.needsIntegrationCheck, false);
+});
+
+test('integrationCheck defaults off, and a malformed one is rejected at load', () => {
+  assert.equal(DEFAULTS.integrationCheck, null);
+  assert.throws(() => loadConfig(repoWithConfig({ integrationCheck: 'pnpm tsc' })), /integrationCheck/);
+  assert.throws(() => loadConfig(repoWithConfig({ integrationCheck: { command: ' ' } })), /integrationCheck/);
+  const c = loadConfig(repoWithConfig({ integrationCheck: { command: 'pnpm tsc' } }));
+  assert.equal(c.integrationCheck.command, 'pnpm tsc');
+  assert.ok(c.integrationCheck.timeoutMs > 0, 'a timeout is always set');
+});
+
+// --- review rounds ------------------------------------------------------------
+
+test('a carried approval binds to its head but is not a round', () => {
+  const reviews = [
+    { state: 'CHANGES_REQUESTED', body: 'fix x', commit: { oid: 'a' } },
+    { state: 'APPROVED', body: 'lgtm', commit: { oid: 'b' } },
+    { state: 'APPROVED', body: `${CARRIED_REVIEW_MARKER}\nsame diff as b`, commit: { oid: 'c' } },
+  ];
+  const r = reviewFor(reviews, 'c');
+  assert.equal(r.state, 'approved');
+  assert.equal(r.rounds, 2);
+});
+
+// --- the integration check's recorded verdict ---------------------------------
+
+test('an integration verdict is keyed by the exact (head, base tip) pair', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-verdict-'));
+  const file = integrationVerdictPath(dir, 'head1', 'base1');
+  assert.equal(readIntegrationVerdict(file).state, 'pending');
+  assert.notEqual(file, integrationVerdictPath(dir, 'head1', 'base2'), 'a new base tip is a new question');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ok: false, output: 'TS2339' }));
+  assert.deepEqual(readIntegrationVerdict(file), { state: 'fail', output: 'TS2339', verdictFile: file });
+  fs.writeFileSync(file, '{"ok": tr');
+  assert.equal(readIntegrationVerdict(file).state, 'pending', 'a torn write is not a verdict');
+});
+
+/**
+ * A real repo: base adds `lib.js` exporting `answer`; the branch adds a caller.
+ * The base then renames the export — no file overlap, a clean textual merge, and
+ * a broken result. That is exactly the move a blast-radius rebase used to buy a
+ * whole CI run to find.
+ */
+function repoWithSemanticBreak() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'land-int-'));
+  const git = (cmd) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd: root, stdio: 'pipe' }).toString().trim();
+  git('init -q -b develop');
+  fs.writeFileSync(path.join(root, 'lib.js'), 'exports.answer = 42;\n');
+  git('add . && git -c user.name=t -c user.email=t@t commit -qm base');
+  git('checkout -qb feat');
+  fs.writeFileSync(path.join(root, 'use.js'), "if (require('./lib.js').answer !== 42) process.exit(1);\n");
+  git('add . && git -c user.name=t -c user.email=t@t commit -qm feat');
+  const head = git('rev-parse HEAD');
+  git('checkout -q develop');
+  const cleanTip = git('rev-parse HEAD');
+  fs.writeFileSync(path.join(root, 'lib.js'), 'exports.theAnswer = 42;\n');
+  git('add . && git -c user.name=t -c user.email=t@t commit -qm rename');
+  const brokenTip = git('rev-parse HEAD');
+  git('checkout -q feat');
+  return { root, head, cleanTip, brokenTip };
+}
+
+test('the integration check judges the MERGE RESULT, and leaves the branch alone', () => {
+  const { root, head, cleanTip, brokenTip } = repoWithSemanticBreak();
+  const cwd = process.cwd();
+  const saved = CONFIG.integrationCheck;
+  CONFIG.integrationCheck = { command: 'node use.js', timeoutMs: 30_000 };
+  try {
+    process.chdir(root);
+    const s = (baseTip) => ({ branch: { headSha: head }, baseTip });
+    assert.equal(runIntegrationCheck(s(cleanTip)), true);
+    assert.equal(runIntegrationCheck(s(brokenTip)), false, 'the rename breaks the caller only once merged');
+
+    const common = path.join(root, '.git');
+    assert.equal(readIntegrationVerdict(integrationVerdictPath(common, head, brokenTip)).state, 'fail');
+    assert.equal(execSync('git rev-parse HEAD', { cwd: root }).toString().trim(), head, 'the branch did not move');
+    assert.equal(execSync('git status --porcelain', { cwd: root }).toString(), '', 'the checkout is untouched');
+    assert.equal(execSync('git worktree list', { cwd: root }).toString().trim().split('\n').length, 1, 'the scratch worktree is reaped');
+  } finally {
+    process.chdir(cwd);
+    CONFIG.integrationCheck = saved;
+  }
 });
 
 test('exit codes are stable — agents branch on these', () => {
