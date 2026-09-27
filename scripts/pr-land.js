@@ -227,18 +227,20 @@ function ciCovers(files, cfg = CONFIG) {
  * turns the landing loop into one that never lands. That is how this function
  * once made a PR that edits package.json rebase on every base move (6 force-
  * pushes in 40 minutes, no merge). Everything the PR's OWN diff raises is
- * therefore answered locally, at the merge gate, by `integrationCheck`.
+ * therefore answered locally, at the merge gate, by `integrationCheck` — or, in
+ * a repo without one, not before the merge at all (the base's own post-merge CI
+ * is then the only answer, as it always was).
  *
  * - Same file changed on both sides → rebase. After it, the overlap is gone.
  * - The BASE moved `rebaseRadius` → rebase. Paths only the full CI can judge;
  *   after the rebase the move is part of the tested base.
+ * - The BASE moved `sharedBlastRadius` → integration check at scope "shared"
+ *   (a rebase, in a repo without one: it is removable).
+ * - The PR changes `sharedBlastRadius` while the base moved code → integration
+ *   check at scope "shared". It was tested against the consumers as they were
+ *   when it branched.
  * - The PR changes `rebaseRadius` while the base moved code → integration check
  *   at scope "wide": the repo's command must cover what those paths reach.
- * - `sharedBlastRadius` changed on either side while the other moved code →
- *   integration check at scope "shared". A PR that edits shared code was tested
- *   against the consumers as they were when it branched, which is exactly as
- *   unverified as the mirror case.
- * - A repo with no `integrationCheck` rebases where it would have checked.
  *
  * `forced` and `blast` list the triggering files, from whichever side.
  */
@@ -249,24 +251,21 @@ function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const baseMovedCode = movedCode(baseChangedFiles);
   const prMovedCode = movedCode(prFiles);
   const radius = cfg.rebaseRadius || [];
+  const hasCheck = Boolean(cfg.integrationCheck);
 
   const forced = prMovedCode ? touches(baseChangedFiles, radius) : [];
+  const baseBlast = prMovedCode ? touches(baseChangedFiles, cfg.sharedBlastRadius) : [];
+  const prBlast = baseMovedCode ? touches(prFiles, cfg.sharedBlastRadius) : [];
   const prWide = baseMovedCode ? touches(prFiles, radius) : [];
-  const blast = [
-    ...new Set([
-      ...(prMovedCode ? touches(baseChangedFiles, cfg.sharedBlastRadius) : []),
-      ...(baseMovedCode ? touches(prFiles, cfg.sharedBlastRadius) : []),
-      ...prWide,
-    ]),
-  ].filter((f) => !forced.includes(f));
-  const blastOnly = overlap.length === 0 && forced.length === 0 && blast.length > 0;
+  const blast = [...new Set([...baseBlast, ...prBlast, ...prWide])].filter((f) => !forced.includes(f));
+  const settled = overlap.length === 0 && forced.length === 0;
   return {
     overlap,
     forced,
     blast,
     scope: prWide.length > 0 ? 'wide' : 'shared',
-    needsRebase: overlap.length > 0 || forced.length > 0 || (blastOnly && !cfg.integrationCheck),
-    needsIntegrationCheck: blastOnly && Boolean(cfg.integrationCheck),
+    needsRebase: !settled || (!hasCheck && baseBlast.length > 0),
+    needsIntegrationCheck: settled && hasCheck && blast.length > 0,
   };
 }
 
@@ -322,9 +321,9 @@ function readIntegrationVerdictFile(file) {
  *
  * - A narrower verdict never answers a wider question (shared ⊂ wide).
  * - On the same tip, the verdict stands either way.
- * - Past it, a PASS holds while nothing moved in the PR's own files or either
- *   radius; anything else — including an old FAIL, which a new base may fix —
- *   is re-checked.
+ * - Past it, a PASS holds while nothing moved in the PR's own files or in
+ *   rebaseRadius; anything else — including an old FAIL, which a new base may
+ *   fix — is re-checked.
  */
 function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles }, cfg = CONFIG) {
   const pending = { state: 'pending', output: '' };
@@ -333,9 +332,14 @@ function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles }, cfg
   const out = String(v.output || '');
   if (v.baseTip === baseTip) return { state: v.ok ? 'pass' : 'fail', output: out };
   if (!v.ok || movedSince === null) return pending;
+  // NOT sharedBlastRadius: shared code moves on most merges, and a check that
+  // takes longer than the gap between them would then never settle. A shared
+  // move that lands while the check runs is the one gap left, and the base's
+  // own post-merge CI (never cancelled) is what covers it. A move into the PR's
+  // own files or rebaseRadius is re-judged — and the latter rebases anyway.
   const relevant = [
     ...movedSince.filter((f) => prFiles.includes(f)),
-    ...touches(movedSince, [...cfg.sharedBlastRadius, ...(cfg.rebaseRadius || [])]),
+    ...touches(movedSince, cfg.rebaseRadius || []),
   ];
   return relevant.length ? pending : { state: 'pass', output: out };
 }
@@ -591,6 +595,30 @@ function ensureLabel() {
 }
 
 /**
+ * spawnSync's timeout kills the shell and nothing under it, so a check that runs
+ * out of time leaves its test workers running — holding RAM in a directory about
+ * to be deleted, under the next check. Anything still working in `dir` is killed.
+ * Linux only (/proc); elsewhere a no-op.
+ */
+function killProcessesUnder(dir) {
+  let pids;
+  try {
+    pids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p));
+  } catch {
+    return;
+  }
+  for (const pid of pids) {
+    if (Number(pid) === process.pid) continue;
+    try {
+      const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+      if (cwd === dir || cwd.startsWith(`${dir}/`)) process.kill(Number(pid), 'SIGKILL');
+    } catch {
+      // Gone already, or not ours to inspect.
+    }
+  }
+}
+
+/**
  * Builds the merge result (base tip + this head) in a throwaway worktree, runs the
  * repo's integrationCheck there, and records the verdict for observe() to read.
  *
@@ -633,6 +661,7 @@ function runIntegrationCheck(s) {
       if (r.error) output += `\n${r.error.message}`;
     }
   } finally {
+    killProcessesUnder(dir);
     fs.rmSync(dir, { recursive: true, force: true });
     sh('git worktree prune', { allowFail: true });
   }
@@ -767,10 +796,17 @@ function main() {
     log('  The defaults fail closed, not open, but add one before relying on this.\n');
   }
 
-  const deadlines = {
-    checks: Date.now() + CONFIG.checksTimeoutMs,
-    review: Date.now() + CONFIG.reviewTimeoutMs,
+  // Per head, not per invocation: a rebase or a long integration check inside
+  // this same run starts a new CI run, and a deadline set at startup would then
+  // expire on a run that was only just dispatched — reported, wrongly, as "CI
+  // never settled".
+  const deadlines = {};
+  let deadlineHead = null;
+  const resetDeadlines = () => {
+    deadlines.checks = Date.now() + CONFIG.checksTimeoutMs;
+    deadlines.review = Date.now() + CONFIG.reviewTimeoutMs;
   };
+  resetDeadlines();
   let last = '';
   let unknownStreak = 0;
   // A reconciler must make progress. If the same non-waiting action repeats
@@ -781,6 +817,10 @@ function main() {
 
   for (;;) {
     const s = observe(deadlines);
+    if (s.branch.headSha !== deadlineHead) {
+      if (deadlineHead !== null) resetDeadlines();
+      deadlineHead = s.branch.headSha;
+    }
 
     // An unreadable world is NOT a verdict about the PR — look again.
     if (s.pr.state === 'unknown' || s.checks.state === 'unknown') {
@@ -841,6 +881,6 @@ module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
   CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck,
+  runIntegrationCheck, killProcessesUnder,
   checksVerdict, runIdOf,
 };

@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const {
   hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
   reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck,
+  runIntegrationCheck, killProcessesUnder,
 } = require('../pr-land.js');
 import { execSync } from 'node:child_process';
 
@@ -152,10 +152,18 @@ test('staleness is symmetric: a PR changing shared code is checked when the base
   assert.deepEqual(m.blast, ['packages/shared/x.ts']);
 });
 
-test('staleness is symmetric for rebaseRadius too', () => {
-  const withRadius = { ...cfg, rebaseRadius: ['pnpm-lock.yaml'] };
-  const m = baseMovement(['src/A.tsx'], ['pnpm-lock.yaml'], withRadius);
-  assert.equal(m.needsRebase, true, 'a dependency change was tested against the old code');
+// The same livelock, in a repo with no integrationCheck: the PR's own diff is a
+// trigger no rebase removes, so it must not rebase for it. Without a local check
+// there is nothing to run before the merge, and the base's post-merge CI answers.
+test('without an integrationCheck, only the BASE side rebases — the PR side never does', () => {
+  const noCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['pnpm-lock.yaml'] };
+  for (const own of ['pnpm-lock.yaml', 'packages/shared/x.ts']) {
+    const m = baseMovement(['src/A.tsx'], [own], noCheck);
+    assert.equal(m.needsRebase, false, `${own} in the PR must not rebase on every base move`);
+    assert.equal(m.needsIntegrationCheck, false);
+  }
+  assert.equal(baseMovement(['packages/shared/x.ts'], ['src/A.tsx'], noCheck).needsRebase, true, 'removable');
+  assert.equal(baseMovement(['pnpm-lock.yaml'], ['src/A.tsx'], noCheck).needsRebase, true, 'removable');
 });
 
 // The livelock this rule exists to prevent. A PR that edits package.json used to
@@ -250,12 +258,28 @@ test('verdict: a PASS survives base moves that cannot matter to it', () => {
   assert.equal(judge(v, { movedSince: ['docs/x.md', 'apps/other/B.tsx'] }).state, 'pass');
 });
 
-test('verdict: a PASS is re-checked when the base moved the PR files or a radius', () => {
+test('verdict: a PASS is re-checked when the base moved the PR files or rebaseRadius', () => {
   const v = { baseTip: 't1', scope: 'shared', ok: true };
   assert.equal(judge(v, { movedSince: ['src/A.tsx'] }).state, 'pending', "the PR's own file");
-  assert.equal(judge(v, { movedSince: ['packages/shared/x.ts'] }).state, 'pending', 'shared radius');
   assert.equal(judge(v, { movedSince: ['package.json'] }).state, 'pending', 'rebase radius');
   assert.equal(judge(v, { movedSince: null }).state, 'pending', 'an unreadable move is no answer');
+});
+
+// Shared code moves on most merges. Were it to void a PASS, a check longer than
+// the gap between merges would re-run forever — the review of #1123 caught this.
+test('verdict: a PASS survives shared-radius moves — or a long check never settles', () => {
+  const v = { baseTip: 't1', scope: 'wide', ok: true };
+  assert.equal(judge(v, { scope: 'wide', movedSince: ['packages/shared/x.ts'] }).state, 'pass');
+});
+
+test('killProcessesUnder reaps what a timed-out check left running in its directory', { skip: process.platform !== 'linux' }, async () => {
+  const { spawn } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-reap-'));
+  const child = spawn('sleep', ['60'], { cwd: dir, stdio: 'ignore' });
+  const exited = new Promise((resolve) => child.on('exit', (_code, signal) => resolve(signal)));
+  await new Promise((r) => setTimeout(r, 100));
+  killProcessesUnder(dir);
+  assert.equal(await exited, 'SIGKILL');
 });
 
 test('verdict: an old FAIL is re-checked on a new tip — the base may have fixed it', () => {

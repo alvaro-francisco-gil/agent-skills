@@ -389,13 +389,13 @@ test('the gate is checked AFTER rebase — a stale gated PR rebases first', () =
   assert.equal(decide(s).action, ACTION.REBASE);
 });
 
-test('a gated PR is integration-checked before it is handed over', () => {
+test('a gated PR is handed over BEFORE the integration check — the check cannot change that outcome', () => {
   const s = withState({
     gated: ['firestore.rules — security rules'],
     base: blastOnly,
     integration: { state: 'pending', output: '', verdictFile: '/v' },
   });
-  assert.equal(decide(s).action, ACTION.INTEGRATION_CHECK);
+  assert.equal(decide(s).exit, EXIT.NEEDS_HUMAN);
 });
 
 // --- purity -----------------------------------------------------------------
