@@ -81,10 +81,14 @@ A resumable state machine, not a merge command. Run it, act on the exit code, ru
 | Exit | Meaning | You do |
 |---|---|---|
 | `0` | Merged, branch deleted | Done — go to Step 5 |
-| `10` | CI red | Read the log, fix, re-run |
+| `10` | CI red, or the merge result fails the repo's `integrationCheck` | Read the log, fix, re-run |
 | `20` | Review requested changes | Fix the **cause**, never silence it, re-run |
 | `30` | Hard-stop, no reviewer, or rounds exhausted | **Stop.** Hand to the user with the PR link |
 | `40` | Preflight failed — dirty tree, protected branch, or the PR conflicts with its base | Resolve, re-run |
+
+Exit `20` can arrive while CI is still running: findings are reported as soon as they land.
+Fix and push without waiting for the run — the push supersedes it, and waiting would spend a
+CI lane on a head you already know you are replacing.
 
 Exit `20` is a budget, capped at `maxReviewRounds`. What happens at the cap is the repo's
 call, in `roundsExhausted`: `"handoff"` turns it into exit `30`, and `"merge"` ends the
@@ -97,6 +101,13 @@ knowing why it is not a timeout: `pull_request` jobs check out `refs/pull/<n>/me
 GitHub cannot build that ref while the merge conflicts — so a conflicting PR dispatches no
 workflow runs at all, and waiting for CI on one waits forever. Rebase onto the base,
 resolve, push with `--force-with-lease`, re-run.
+
+**Do not rebase by hand to "keep the branch fresh".** `pr:land` rebases on its own when the
+base changed a file this PR changes, and it does so before waiting on CI, so the discarded
+run is usually one still queued. A base that moved only through the repo's shared blast
+radius is checked locally on the merge result instead (`integrationCheck`), costing no CI
+lane and no review round. A hand rebase buys neither saving: it restarts every lane and asks
+for a fresh review.
 
 On exit `10`, read the failure before assuming it is your code. An infrastructure failure
 — a broken runner cache, a hung service lane — is not a regression to "fix". Inventing a

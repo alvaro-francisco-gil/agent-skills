@@ -76,6 +76,7 @@ review gate rather than silently auto-merging something it never declared.
   "mergeMethod": "merge",
   "ciPaths": ["src/", "functions/", "package.json", "pnpm-lock.yaml"],
   "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
+  "integrationCheck": { "command": "pnpm -s typecheck" },
   "hardStop": [
     { "pattern": "^firestore\\.rules$", "why": "security rules" },
     { "pattern": "^scripts/backfills/", "why": "data backfill" }
@@ -88,6 +89,20 @@ review gate rather than silently auto-merging something it never declared.
 - `mergeMethod` is `"merge"`, `"squash"` or `"rebase"` — match whatever the repo's history
   already does, since the loop is not the place to change it. An unrecognised value is
   rejected when the config loads, not at the merge.
+- `sharedBlastRadius` names paths whose movement on the base matters to every PR (a
+  shared package, the lockfile). With no `integrationCheck`, such a move forces a rebase —
+  every CI lane and a fresh review, for every open PR, on every merge. Set
+  `integrationCheck` (`{ "command": "…", "timeoutMs": 900000 }`) and `pr:land` instead
+  builds the merge result in a throwaway worktree and runs that command there, once the PR
+  is green and approved. Keep it to what a shared-code move can break without touching the
+  PR's files — typecheck and fast unit tests, not the full suite. A change to the *same
+  file* on both sides still rebases.
+- `rebaseRadius` names paths whose movement only the full CI can judge — security rules,
+  anything whose behaviour lives in an emulator. A move there always rebases, even with an
+  `integrationCheck`; keep them out of what the local command is trusted with.
+- A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the
+  reviewer re-posted onto a new head with an identical diff (a clean rebase). It counts as
+  an approval and not as a round.
 - `hardStop[].pattern` is a regex *source string*, not `/slashes/`; add `"flags": "i"` if needed.
 - `requireApprovingReview: false` is a **weaker** bar, not an equivalent one. Set it only where
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.

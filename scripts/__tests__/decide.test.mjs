@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { decide, EXIT, ACTION } = require('../decide.js');
+const { baseMovement } = require('../pr-land.js');
 
 // The point of extracting decide(): the ENTIRE decision table is now testable
 // with no network, no git, no gh. The pipeline version could only be tested by
@@ -27,7 +28,9 @@ const base = () => ({
   files: ['src/a.ts'],
   ciWillRun: true,
   gated: [],
-  base: { overlap: [], blast: [], needsRebase: false },
+  base: { overlap: [], blast: [], needsRebase: false, needsIntegrationCheck: false },
+  baseTip: 'tip',
+  integration: { state: 'not-needed', output: '', verdictFile: null },
   checksDeadlinePassed: false,
   reviewDeadlinePassed: false,
 });
@@ -282,12 +285,96 @@ test('a gated PR reports the same bar it actually cleared', () => {
 // --- integration and the gate green cannot answer ---------------------------
 
 test('base moved into this diff → rebase', () => {
-  const s = withState({ base: { overlap: ['src/a.ts'], blast: [], needsRebase: true } });
+  const s = withState({ base: { overlap: ['src/a.ts'], blast: [], needsRebase: true, needsIntegrationCheck: false } });
   assert.equal(decide(s).action, ACTION.REBASE);
 });
 
 test('base moved elsewhere → no rebase, green still holds', () => {
   assert.equal(decide(base()).action, ACTION.MERGE);
+});
+
+// The contract between the two files. decide() read `base.needsRebase` while
+// pr-land's helper returned `rebase`, so REBASE was unreachable from 2026-08-21
+// until this test existed: each side's tests built their own idea of the shape.
+// This one feeds decide() the helper's REAL output.
+test('CONTRACT: decide() acts on what baseMovement() actually returns', () => {
+  const cfg = { sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1 } };
+  const overlap = withState({ base: baseMovement(['src/a.ts'], ['src/a.ts'], cfg) });
+  assert.equal(decide(overlap).action, ACTION.REBASE);
+  const blast = withState({
+    base: baseMovement(['packages/shared/x.ts'], ['src/a.ts'], cfg),
+    integration: { state: 'pending', output: '', verdictFile: '/v' },
+  });
+  assert.equal(decide(blast).action, ACTION.INTEGRATION_CHECK);
+});
+
+const overlapping = { overlap: ['src/a.ts'], blast: [], needsRebase: true, needsIntegrationCheck: false };
+
+test('a PR that must rebase does it BEFORE waiting on CI, not after it is green', () => {
+  const s = withState({ base: overlapping, checks: { state: 'pending', failures: [] } });
+  assert.equal(decide(s).action, ACTION.REBASE);
+});
+
+test('a PR that must rebase does it before waiting on review', () => {
+  const s = withState({ base: overlapping, review: { state: 'none', rounds: 1, body: '' } });
+  assert.equal(decide(s).action, ACTION.REBASE);
+});
+
+test('findings are reported while CI is still running — the fix push supersedes that run', () => {
+  const s = withState({
+    checks: { state: 'pending', failures: [] },
+    review: { state: 'changes_requested', rounds: 1, body: 'null deref in foo()' },
+  });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.CHANGES_REQUESTED);
+  assert.match(d.detail, /null deref/);
+});
+
+test('findings go back to the author before a rebase', () => {
+  const s = withState({ base: overlapping, review: { state: 'changes_requested', rounds: 1, body: 'x' } });
+  assert.equal(decide(s).exit, EXIT.CHANGES_REQUESTED);
+});
+
+test('an approval alone still waits for CI', () => {
+  const s = withState({ checks: { state: 'pending', failures: [] } });
+  assert.equal(decide(s).action, ACTION.WAIT_CHECKS);
+});
+
+test('red CI goes back to the author before any rebase', () => {
+  const s = withState({ base: overlapping, checks: { state: 'red', failures: [] } });
+  assert.equal(decide(s).exit, EXIT.CI_RED);
+});
+
+// --- the local integration check --------------------------------------------
+
+const blastOnly = { overlap: [], blast: ['packages/shared/x.ts'], needsRebase: false, needsIntegrationCheck: true };
+
+test('a blast-radius move is checked locally once the PR is green and approved', () => {
+  const s = withState({ base: blastOnly, integration: { state: 'pending', output: '', verdictFile: '/v' } });
+  assert.equal(decide(s).action, ACTION.INTEGRATION_CHECK);
+});
+
+test('the local check waits for CI and review — the base keeps moving until then', () => {
+  const s = withState({
+    base: blastOnly,
+    integration: { state: 'pending', output: '', verdictFile: '/v' },
+    checks: { state: 'pending', failures: [] },
+  });
+  assert.equal(decide(s).action, ACTION.WAIT_CHECKS);
+});
+
+test('a passing merge result merges without a rebase', () => {
+  const s = withState({ base: blastOnly, integration: { state: 'pass', output: '', verdictFile: '/v' } });
+  assert.equal(decide(s).action, ACTION.MERGE);
+});
+
+test('a failing merge result is red, with the output and how to retry', () => {
+  const s = withState({ base: blastOnly, integration: { state: 'fail', output: 'TS2339 foo', verdictFile: '/v.json' } });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.CI_RED);
+  assert.match(d.detail, /TS2339 foo/);
+  assert.match(d.detail, /git rebase origin\/develop/);
+  assert.match(d.detail, /\/v\.json/);
 });
 
 test('gated paths hand off even when green, approved and current', () => {
@@ -298,11 +385,17 @@ test('gated paths hand off even when green, approved and current', () => {
 });
 
 test('the gate is checked AFTER rebase — a stale gated PR rebases first', () => {
+  const s = withState({ gated: ['firestore.rules — security rules'], base: overlapping });
+  assert.equal(decide(s).action, ACTION.REBASE);
+});
+
+test('a gated PR is integration-checked before it is handed over', () => {
   const s = withState({
     gated: ['firestore.rules — security rules'],
-    base: { overlap: ['x'], blast: [], needsRebase: true },
+    base: blastOnly,
+    integration: { state: 'pending', output: '', verdictFile: '/v' },
   });
-  assert.equal(decide(s).action, ACTION.REBASE);
+  assert.equal(decide(s).action, ACTION.INTEGRATION_CHECK);
 });
 
 // --- purity -----------------------------------------------------------------
