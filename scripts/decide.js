@@ -198,7 +198,7 @@ function decide(s) {
   if (s.base.needsRebase) {
     return {
       action: ACTION.REBASE,
-      why: `the base moved into this diff (${s.base.overlap.length} overlapping, ${s.base.blast.length} shared)`,
+      why: `the base moved into this diff (${s.base.overlap.length} overlapping, ${(s.base.forced || []).length} only CI can judge, ${s.base.blast.length} shared)`,
     };
   }
 

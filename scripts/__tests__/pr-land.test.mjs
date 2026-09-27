@@ -124,6 +124,23 @@ test('staleness: overlap wins over the local check — the same file on both sid
   assert.equal(m.needsIntegrationCheck, false);
 });
 
+test('staleness: a rebaseRadius move rebases even when a local check is configured', () => {
+  const withCheck = {
+    ...cfg,
+    sharedBlastRadius: ['packages/shared/', 'firestore.rules'],
+    rebaseRadius: ['firestore.rules'],
+    integrationCheck: { command: 'true', timeoutMs: 1000 },
+  };
+  const rules = baseMovement(['firestore.rules', 'packages/shared/x.ts'], ['src/A.tsx'], withCheck);
+  assert.equal(rules.needsRebase, true, 'a typecheck cannot judge a rules change');
+  assert.equal(rules.needsIntegrationCheck, false);
+  assert.deepEqual(rules.forced, ['firestore.rules']);
+  assert.deepEqual(rules.blast, ['packages/shared/x.ts'], 'a forced path is not double-counted');
+
+  const shared = baseMovement(['packages/shared/x.ts'], ['src/A.tsx'], withCheck);
+  assert.equal(shared.needsIntegrationCheck, true);
+});
+
 test('integrationCheck defaults off, and a malformed one is rejected at load', () => {
   assert.equal(DEFAULTS.integrationCheck, null);
   assert.throws(() => loadConfig(repoWithConfig({ integrationCheck: 'pnpm tsc' })), /integrationCheck/);

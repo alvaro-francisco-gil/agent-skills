@@ -95,8 +95,11 @@ review gate rather than silently auto-merging something it never declared.
   `integrationCheck` (`{ "command": "…", "timeoutMs": 900000 }`) and `pr:land` instead
   builds the merge result in a throwaway worktree and runs that command there, once the PR
   is green and approved. Keep it to what a shared-code move can break without touching the
-  PR's files — typecheck, not the full suite. A change to the *same file* on both sides
-  still rebases.
+  PR's files — typecheck and fast unit tests, not the full suite. A change to the *same
+  file* on both sides still rebases.
+- `rebaseRadius` names paths whose movement only the full CI can judge — security rules,
+  anything whose behaviour lives in an emulator. A move there always rebases, even with an
+  `integrationCheck`; keep them out of what the local command is trusted with.
 - A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the
   reviewer re-posted onto a new head with an identical diff (a clean rebase). It counts as
   an approval and not as a round.

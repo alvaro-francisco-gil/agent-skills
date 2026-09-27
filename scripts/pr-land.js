@@ -75,6 +75,7 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "requiredLanes": ["Emulators · Vitest"],   // skipped == failed for these
 //     "hardStop": [{ "pattern": "^firestore\\.rules$", "why": "security rules" }],
 //     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
+//     "rebaseRadius": ["firestore.rules"],       // a move here always rebases
 //     "integrationCheck": { "command": "pnpm -s typecheck", "timeoutMs": 900000 }
 //   }
 //
@@ -103,6 +104,10 @@ const DEFAULTS = {
   hardStop: [],
   hardStopTrailerSource: '^Breaking-Client:',
   sharedBlastRadius: [],
+  // Paths whose movement on the base only the FULL CI can judge (security rules,
+  // anything whose behaviour lives in an emulator). A move here always rebases,
+  // integrationCheck or not.
+  rebaseRadius: [],
   // A local command run against the MERGE RESULT (base tip + this head) when the
   // base moved only through `sharedBlastRadius`. null keeps the old answer to
   // such a move — a rebase, which re-runs every CI lane and the review.
@@ -218,6 +223,8 @@ function ciCovers(files, cfg = CONFIG) {
  *
  * - The same file changed on both sides → rebase. That is where a clean textual
  *   merge most often hides a semantic one, and only the full CI run sees it.
+ * - The base moved through `rebaseRadius` → rebase. Those are paths whose
+ *   behaviour only the full CI can judge, so no local command stands in for it.
  * - The base moved only through the shared blast radius → run the repo's
  *   `integrationCheck` locally against the merge result. A rebase would answer
  *   the same question by re-running every CI lane AND the review, and with N
@@ -226,12 +233,14 @@ function ciCovers(files, cfg = CONFIG) {
  */
 function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const overlap = baseChangedFiles.filter((f) => prFiles.includes(f));
-  const blast = touches(baseChangedFiles, cfg.sharedBlastRadius);
-  const blastOnly = overlap.length === 0 && blast.length > 0;
+  const forced = touches(baseChangedFiles, cfg.rebaseRadius || []);
+  const blast = touches(baseChangedFiles, cfg.sharedBlastRadius).filter((f) => !forced.includes(f));
+  const blastOnly = overlap.length === 0 && forced.length === 0 && blast.length > 0;
   return {
     overlap,
+    forced,
     blast,
-    needsRebase: overlap.length > 0 || (blastOnly && !cfg.integrationCheck),
+    needsRebase: overlap.length > 0 || forced.length > 0 || (blastOnly && !cfg.integrationCheck),
     needsIntegrationCheck: blastOnly && Boolean(cfg.integrationCheck),
   };
 }
