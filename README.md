@@ -97,12 +97,19 @@ review gate rather than silently auto-merging something it never declared.
   is green and approved. Keep it to what a shared-code move can break without touching the
   PR's files — typecheck and fast unit tests, not the full suite. A change to the *same
   file* on both sides still rebases.
-- Both radii are **symmetric**: a path counts whichever side changed it, as long as the other
-  side moved something `ciPaths` covers. A PR that edits shared code was tested against the
-  consumers as they were when it branched, which is exactly as unverified as the mirror case.
-- `rebaseRadius` names paths whose movement only the full CI can judge — security rules,
-  anything whose behaviour lives in an emulator. A move there always rebases, even with an
-  `integrationCheck`; keep them out of what the local command is trusted with.
+- **A rebase is only ever triggered by something a rebase removes**, or the loop can never
+  land a PR on a base that moves faster than its CI:
+  - the same file changed on both sides, or the **base** moved a `rebaseRadius` path
+    (paths only the full CI can judge — security rules, root manifests) → rebase, early;
+  - the **PR** changes a `rebaseRadius` path → `integrationCheck` at scope `wide`;
+  - `sharedBlastRadius` changed on either side → `integrationCheck` at scope `shared`.
+
+  "Either side" counts only when the other side moved code `ciPaths` covers (any change,
+  with no `ciPaths`). The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
+  (`shared` | `wide`) and decides what each covers; `wide` should reach every workspace a
+  `rebaseRadius` path can break. A passing verdict is kept per head and holds while the
+  base moves only through paths outside the PR's files and both radii, so a check that
+  takes minutes cannot be starved by a base that moves every few.
 - A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the
   reviewer re-posted onto a new head with an identical diff (a clean rebase). It counts as
   an approval and not as a round.
