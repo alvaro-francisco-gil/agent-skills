@@ -615,7 +615,10 @@ function runIntegrationCheck(s) {
     if (merged === null) {
       output = `${s.branch.headSha.slice(0, 12)} does not merge cleanly onto ${s.baseTip.slice(0, 12)}.`;
     } else {
-      const r = spawnSync(CONFIG.integrationCheck.command, {
+      // `2>&1` inside the shell, not stdout+stderr concatenated afterwards: tools
+      // like Jest write their report to stderr, so the concatenation put a passing
+      // suite's last lines at the tail and dropped the step that actually failed.
+      const r = spawnSync(`${CONFIG.integrationCheck.command} 2>&1`, {
         cwd: dir,
         // "shared" or "wide" — see baseMovement. The command decides what each covers.
         env: { ...process.env, PR_LAND_INTEGRATION_SCOPE: scope },
@@ -626,7 +629,7 @@ function runIntegrationCheck(s) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       ok = r.status === 0;
-      output = `${r.stdout || ''}${r.stderr || ''}`.split('\n').slice(-60).join('\n');
+      output = String(r.stdout || '').split('\n').slice(-60).join('\n');
       if (r.error) output += `\n${r.error.message}`;
     }
   } finally {
