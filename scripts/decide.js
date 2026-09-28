@@ -263,6 +263,18 @@ function decide(s) {
         why: `the base moved through the shared blast radius (${s.base.blast.length} files) — checking the merge result`,
       };
     }
+    if (s.integration.state === 'error') {
+      return {
+        exit: EXIT.NEEDS_HUMAN,
+        why: 'the integration check could not run — this says nothing about the PR',
+        detail: [
+          s.integration.output,
+          '',
+          '  A missing tool, a failed install or a timeout on this machine. Fix the machine,',
+          `  then delete the verdict and re-run: ${s.integration.verdictFile}`,
+        ].join('\n'),
+      };
+    }
     if (s.integration.state === 'fail') {
       return {
         exit: EXIT.CI_RED,

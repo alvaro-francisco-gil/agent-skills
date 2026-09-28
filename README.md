@@ -104,14 +104,18 @@ review gate rather than silently auto-merging something it never declared.
   - the **PR** changes a `rebaseRadius` path → `integrationCheck` at scope `wide`;
   - `sharedBlastRadius` changed on either side → `integrationCheck` at scope `shared`.
 
-  "Either side" counts only when the other side moved code `ciPaths` covers (any change,
-  with no `ciPaths`). The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
+  "Either side" counts whenever the other side moved anything — not only what `ciPaths`
+  covers, because a consumer with its own workflow sits outside that filter while importing
+  the shared code all the same. The command receives the scope as `PR_LAND_INTEGRATION_SCOPE`
   (`shared` | `wide`) and decides what each covers; `wide` should reach every workspace a
   `rebaseRadius` path can break. A passing verdict is kept per head and holds while the
   base moves only outside the PR's files and `rebaseRadius` — shared code moves on most
   merges, and voiding the verdict for it would starve any check longer than the gap
   between them; a shared move that lands mid-check is left to the base's own post-merge
-  CI. A hard-stopped PR is handed over before the check runs.
+  CI. A verdict older than `maxAgeMs` (default 30 min) answers nothing. A hard-stopped PR is
+  handed over before the check runs. Checks run one at a time per clone (parallel workers
+  share it), and a command that exits **3** — or times out — is recorded as *could not run*
+  and handed to a human, never reported as a broken merge.
 - With no `integrationCheck`, only the **base** side rebases; the PR's own side of a radius
   is not verified before the merge at all, because a rebase cannot remove that trigger.
 - A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the

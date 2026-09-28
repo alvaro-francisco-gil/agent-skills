@@ -150,7 +150,7 @@ function loadConfig(repoRoot = process.cwd()) {
     if (!ic || typeof ic.command !== 'string' || !ic.command.trim()) {
       throw new Error(`${CONFIG_FILENAME}: integrationCheck must be null or { "command": "<shell command>" }`);
     }
-    merged.integrationCheck = { timeoutMs: 15 * 60 * 1000, ...ic };
+    merged.integrationCheck = { timeoutMs: 15 * 60 * 1000, maxAgeMs: 30 * 60 * 1000, ...ic };
   }
   merged.configFound = fs.existsSync(file);
   return merged;
@@ -236,20 +236,23 @@ function ciCovers(files, cfg = CONFIG) {
  *   after the rebase the move is part of the tested base.
  * - The BASE moved `sharedBlastRadius` → integration check at scope "shared"
  *   (a rebase, in a repo without one: it is removable).
- * - The PR changes `sharedBlastRadius` while the base moved code → integration
+ * - The PR changes `sharedBlastRadius` while the base moved anything → integration
  *   check at scope "shared". It was tested against the consumers as they were
  *   when it branched.
- * - The PR changes `rebaseRadius` while the base moved code → integration check
- *   at scope "wide": the repo's command must cover what those paths reach.
+ * - The PR changes `rebaseRadius` while the base moved anything → integration
+ *   check at scope "wide": the repo's command must cover what those paths reach.
+ *
+ * "Anything", not "anything `ciPaths` covers": ciPaths mirrors ONE workflow's
+ * filter, and a consumer with its own workflow (a web app, a console) is outside
+ * it while importing the shared code all the same. A check the other side did
+ * not need costs minutes of local time, once; a skipped one costs a broken base.
  *
  * `forced` and `blast` list the triggering files, from whichever side.
  */
 function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
   const overlap = baseChangedFiles.filter((f) => prFiles.includes(f));
-  // With no CI path map there is no telling code from prose, so any change counts.
-  const movedCode = (files) => ((cfg.ciPaths || []).length ? ciCovers(files, cfg) : files.length > 0);
-  const baseMovedCode = movedCode(baseChangedFiles);
-  const prMovedCode = movedCode(prFiles);
+  const baseMovedCode = baseChangedFiles.length > 0;
+  const prMovedCode = prFiles.length > 0;
   const radius = cfg.rebaseRadius || [];
   const hasCheck = Boolean(cfg.integrationCheck);
 
@@ -320,17 +323,22 @@ function readIntegrationVerdictFile(file) {
  * (null when that could not be read — no answer, so look again).
  *
  * - A narrower verdict never answers a wider question (shared ⊂ wide).
- * - On the same tip, the verdict stands either way.
+ * - Older than `integrationCheck.maxAgeMs`, it answers nothing: the base has
+ *   moved on under it however unrelated each single move looked.
+ * - On the same tip, the verdict stands — pass, fail, or `error` (the check could
+ *   not run: a missing tool, a timeout — never a statement about the merge).
  * - Past it, a PASS holds while nothing moved in the PR's own files or in
  *   rebaseRadius; anything else — including an old FAIL, which a new base may
  *   fix — is re-checked.
  */
-function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles }, cfg = CONFIG) {
+function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles, now = Date.now() }, cfg = CONFIG) {
   const pending = { state: 'pending', output: '' };
   if (!v) return pending;
   if (scope === 'wide' && v.scope !== 'wide') return pending;
+  const maxAgeMs = cfg.integrationCheck ? cfg.integrationCheck.maxAgeMs : Infinity;
+  if (typeof v.at !== 'number' || now - v.at > maxAgeMs) return pending;
   const out = String(v.output || '');
-  if (v.baseTip === baseTip) return { state: v.ok ? 'pass' : 'fail', output: out };
+  if (v.baseTip === baseTip) return { state: v.error ? 'error' : v.ok ? 'pass' : 'fail', output: out };
   if (!v.ok || movedSince === null) return pending;
   // NOT sharedBlastRadius: shared code moves on most merges, and a check that
   // takes longer than the gap between them would then never settle. A shared
@@ -627,12 +635,63 @@ function killProcessesUnder(dir) {
  * real one. Reaped with rm + prune, never `worktree remove --force`, because a
  * repo with a submodule makes the refusal routine (see reportReap).
  */
+/**
+ * The command's own exit code for "I could not run" (a missing tool, a failed
+ * install) as opposed to "the merge result is broken". Recorded as `error`, so the
+ * author is never told to fix code that has nothing wrong with it.
+ */
+const INTEGRATION_CHECK_CANNOT_RUN = 3;
+
+/**
+ * One check at a time per clone. Each is a full install plus every typecheck and
+ * test runner, and parallel workers landing together (all worktrees of one clone)
+ * would otherwise run them side by side on a dev box with no RAM budget. The lock
+ * holds the owner's pid, so one left by a killed run is recognised and taken over.
+ */
+function withIntegrationLock(common, fn) {
+  const lock = path.join(common, 'pr-land', 'integration.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  let announced = false;
+  for (;;) {
+    try {
+      fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+      break;
+    } catch {
+      const owner = Number(fs.readFileSync(lock, 'utf8'));
+      let alive = false;
+      try {
+        process.kill(owner, 0);
+        alive = true;
+      } catch {
+        // No such process: a killed run's lock.
+      }
+      if (!alive) {
+        fs.rmSync(lock, { force: true });
+        continue;
+      }
+      if (!announced) log(`  waiting for another integration check (pid ${owner}) to finish`);
+      announced = true;
+      sleep(CONFIG.pollIntervalMs);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+}
+
 function runIntegrationCheck(s) {
   const common = path.resolve(sh('git rev-parse --git-common-dir'));
+  return withIntegrationLock(common, () => runIntegrationCheckLocked(s, common));
+}
+
+function runIntegrationCheckLocked(s, common) {
   const verdictFile = integrationVerdictPath(common, s.branch.headSha);
   const scope = s.base.scope;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-land-integration-'));
   let ok = false;
+  let error = false;
   let output = '';
   try {
     sh(`git worktree add --detach "${dir}" ${s.baseTip}`);
@@ -657,6 +716,8 @@ function runIntegrationCheck(s) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       ok = r.status === 0;
+      // A timeout or a signal is the machine's verdict, not the merge's.
+      error = !ok && (Boolean(r.error) || r.signal !== null || r.status === INTEGRATION_CHECK_CANNOT_RUN);
       output = String(r.stdout || '').split('\n').slice(-60).join('\n');
       if (r.error) output += `\n${r.error.message}`;
     }
@@ -668,7 +729,7 @@ function runIntegrationCheck(s) {
   fs.mkdirSync(path.dirname(verdictFile), { recursive: true });
   fs.writeFileSync(
     verdictFile,
-    JSON.stringify({ baseTip: s.baseTip, scope, ok, output, command: CONFIG.integrationCheck.command }),
+    JSON.stringify({ baseTip: s.baseTip, scope, ok, error, at: Date.now(), output, command: CONFIG.integrationCheck.command }),
   );
   return ok;
 }
@@ -818,7 +879,12 @@ function main() {
   for (;;) {
     const s = observe(deadlines);
     if (s.branch.headSha !== deadlineHead) {
-      if (deadlineHead !== null) resetDeadlines();
+      if (deadlineHead !== null) {
+        resetDeadlines();
+        // observe() judged the flags against the previous head's deadlines.
+        s.checksDeadlinePassed = Date.now() > deadlines.checks;
+        s.reviewDeadlinePassed = Date.now() > deadlines.review;
+      }
       deadlineHead = s.branch.headSha;
     }
 
@@ -881,6 +947,6 @@ module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
   CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck, killProcessesUnder,
+  runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
   checksVerdict, runIdOf,
 };
