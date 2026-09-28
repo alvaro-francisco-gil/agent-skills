@@ -118,9 +118,9 @@ review gate rather than silently auto-merging something it never declared.
   and handed to a human, never reported as a broken merge.
 - With no `integrationCheck`, only the **base** side rebases; the PR's own side of a radius
   is not verified before the merge at all, because a rebase cannot remove that trigger.
-- A review whose body starts with `<!-- ai-review:carried-approval -->` is an approval the
-  reviewer re-posted onto a new head with an identical diff (a clean rebase). It counts as
-  an approval and not as a round.
+- A **round** is a `CHANGES_REQUESTED` review, and `maxReviewRounds` caps those alone. An
+  approval ends the conversation, so the review a later CI-fix push buys is not a round —
+  and neither is an approval the reviewer re-posts onto a clean rebase.
 - `hardStop[].pattern` is a regex *source string*, not `/slashes/`; add `"flags": "i"` if needed.
 - `requireApprovingReview: false` is a **weaker** bar, not an equivalent one. Set it only where
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.

@@ -8,7 +8,7 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const {
   hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
-  reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
+  reviewFor, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
 } = require('../pr-land.js');
 import { execSync } from 'node:child_process';
@@ -218,15 +218,25 @@ test('integrationCheck defaults off, and a malformed one is rejected at load', (
 
 // --- review rounds ------------------------------------------------------------
 
-test('a carried approval binds to its head but is not a round', () => {
+test('only disagreements are rounds: approvals, carried or not, spend none', () => {
   const reviews = [
     { state: 'CHANGES_REQUESTED', body: 'fix x', commit: { oid: 'a' } },
     { state: 'APPROVED', body: 'lgtm', commit: { oid: 'b' } },
-    { state: 'APPROVED', body: `${CARRIED_REVIEW_MARKER}\nsame diff as b`, commit: { oid: 'c' } },
+    { state: 'APPROVED', body: '<!-- ai-review:carried-approval -->\nsame diff as b', commit: { oid: 'c' } },
+    { state: 'APPROVED', body: 'lgtm after the CI fix', commit: { oid: 'd' } },
+    { state: 'COMMENTED', body: 'nit', commit: { oid: 'd' } },
   ];
-  const r = reviewFor(reviews, 'c');
+  const r = reviewFor(reviews, 'd');
   assert.equal(r.state, 'approved');
-  assert.equal(r.rounds, 2);
+  assert.equal(r.rounds, 1);
+});
+
+test('an approved PR with a new unreviewed head still waits for its review', () => {
+  // Three approvals across CI-fix pushes used to read as three spent rounds, so
+  // under roundsExhausted "merge" the fourth head landed with no review at all.
+  const reviews = ['a', 'b', 'c'].map((oid) => ({ state: 'APPROVED', body: 'lgtm', commit: { oid } }));
+  const r = reviewFor(reviews, 'd');
+  assert.deepEqual([r.state, r.rounds], ['none', 0]);
 });
 
 // --- the integration check's recorded verdict ---------------------------------

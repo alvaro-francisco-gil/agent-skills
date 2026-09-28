@@ -273,16 +273,17 @@ function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
 }
 
 /**
- * Opens the body of a review that re-posts an earlier APPROVE onto a new head
- * whose diff is byte-identical (a clean rebase). The reviewer writes it; it read
- * nothing, so it is not a round. Must match github-review's CARRIED_REVIEW_MARKER.
+ * Reviews bound to THIS commit — an approval of an older head is not an approval.
+ *
+ * `rounds` counts disagreements: every CHANGES_REQUESTED on the PR. An approval
+ * ends the review conversation, so the review a later CI-fix push buys is a fresh
+ * look, not another round of argument. Counting approvals let a PR the reviewer
+ * never objected to exhaust its budget and, under `roundsExhausted: "merge"`,
+ * land its next head unreviewed.
  */
-const CARRIED_REVIEW_MARKER = '<!-- ai-review:carried-approval -->';
-
-/** Reviews bound to THIS commit — an approval of an older head is not an approval. */
 function reviewFor(reviews, headSha) {
   const all = reviews || [];
-  const rounds = all.filter((r) => !String(r.body || '').startsWith(CARRIED_REVIEW_MARKER)).length;
+  const rounds = all.filter((r) => r.state === 'CHANGES_REQUESTED').length;
   const mine = all.filter((r) => (r.commit?.oid || r.commit_id) === headSha);
   const changes = mine.filter((r) => r.state === 'CHANGES_REQUESTED');
   if (changes.length) {
@@ -946,7 +947,7 @@ if (require.main === module) {
 module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
-  CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
+  integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
   checksVerdict, runIdOf,
 };
