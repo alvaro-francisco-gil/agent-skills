@@ -90,7 +90,8 @@ Exit `20` can arrive while CI is still running: findings are reported as soon as
 Fix and push without waiting for the run — the push supersedes it, and waiting would spend a
 CI lane on a head you already know you are replacing.
 
-Exit `20` is a budget, capped at `maxReviewRounds`. What happens at the cap is the repo's
+Exit `20` is a budget, capped at `maxReviewRounds` — every `CHANGES_REQUESTED` spends a
+round, and an approval spends none. What happens at the cap is the repo's
 call, in `roundsExhausted`: `"handoff"` turns it into exit `30`, and `"merge"` ends the
 review conversation and lands the PR on CI green. Under `"merge"` there is nothing left to
 ask the user — do not stop to report that the rounds ran out. Neither setting relaxes the
