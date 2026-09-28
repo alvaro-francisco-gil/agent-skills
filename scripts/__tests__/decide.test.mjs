@@ -368,6 +368,14 @@ test('a passing merge result merges without a rebase', () => {
   assert.equal(decide(s).action, ACTION.MERGE);
 });
 
+test('a check that could not run hands over — it says nothing about the PR', () => {
+  const s = withState({ base: blastOnly, integration: { state: 'error', output: 'jq missing', verdictFile: '/v.json' } });
+  const d = decide(s);
+  assert.equal(d.exit, EXIT.NEEDS_HUMAN);
+  assert.match(d.detail, /jq missing/);
+  assert.doesNotMatch(d.detail, /git rebase/, 'never tell the author to fix code over a machine problem');
+});
+
 test('a failing merge result is red, with the output and how to retry', () => {
   const s = withState({ base: blastOnly, integration: { state: 'fail', output: 'TS2339 foo', verdictFile: '/v.json' } });
   const d = decide(s);

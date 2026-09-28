@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const {
   hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
   reviewFor, CARRIED_REVIEW_MARKER, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck, killProcessesUnder,
+  runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
 } = require('../pr-land.js');
 import { execSync } from 'node:child_process';
 
@@ -193,11 +193,13 @@ test('a shared-only move is checked at scope "shared"', () => {
   assert.equal(baseMovement(['packages/shared/x.ts'], ['src/A.tsx'], withCheck).scope, 'shared');
 });
 
-test('staleness: the other side must have moved code — a docs-only base integrates nothing', () => {
-  const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['pnpm-lock.yaml'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
-  const m = baseMovement(['docs/x.md'], ['packages/shared/x.ts', 'pnpm-lock.yaml'], withCheck);
-  assert.equal(m.needsRebase, false);
-  assert.equal(m.needsIntegrationCheck, false);
+// ciPaths mirrors ONE workflow's filter; a consumer with its own workflow (a web
+// app) sits outside it while importing the shared code. The review of #1123
+// found web-only PRs merging past shared moves unchecked because of it.
+test('staleness: any move on the other side counts — not only what ciPaths covers', () => {
+  const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
+  assert.equal(baseMovement(['packages/shared/x.ts'], ['apps/web/page.tsx'], withCheck).needsIntegrationCheck, true);
+  assert.equal(baseMovement(['apps/web/page.tsx'], ['packages/shared/x.ts'], withCheck).needsIntegrationCheck, true);
 });
 
 test('staleness: with no ciPaths declared, any change on the other side counts', () => {
@@ -231,12 +233,22 @@ test('a carried approval binds to its head but is not a round', () => {
 
 // --- the integration check's recorded verdict ---------------------------------
 
-const vcfg = { ...cfg, sharedBlastRadius: ['packages/shared/'], rebaseRadius: ['package.json'] };
+const vcfg = {
+  ...cfg,
+  sharedBlastRadius: ['packages/shared/'],
+  rebaseRadius: ['package.json'],
+  integrationCheck: { command: 'true', timeoutMs: 1000, maxAgeMs: 30 * 60 * 1000 },
+};
+const NOW = 1_000_000_000;
 const judge = (v, over = {}) =>
-  judgeIntegrationVerdict(v, { baseTip: 't2', scope: 'shared', movedSince: [], prFiles: ['src/A.tsx'], ...over }, vcfg);
+  judgeIntegrationVerdict(
+    { at: NOW - 60_000, ...v },
+    { baseTip: 't2', scope: 'shared', movedSince: [], prFiles: ['src/A.tsx'], now: NOW, ...over },
+    vcfg,
+  );
 
 test('verdict: none recorded, or unreadable, is pending', () => {
-  assert.equal(judge(null).state, 'pending');
+  assert.equal(judgeIntegrationVerdict(null, { baseTip: 't2', scope: 'shared', movedSince: [], prFiles: [] }, vcfg).state, 'pending');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-verdict-'));
   const file = integrationVerdictPath(dir, 'head1');
   assert.equal(readIntegrationVerdictFile(file), null);
@@ -284,6 +296,20 @@ test('killProcessesUnder reaps what a timed-out check left running in its direct
 
 test('verdict: an old FAIL is re-checked on a new tip — the base may have fixed it', () => {
   assert.equal(judge({ baseTip: 't1', scope: 'shared', ok: false }, { movedSince: ['docs/x.md'] }).state, 'pending');
+});
+
+// A pass that holds across unrelated moves must not hold forever: a run killed
+// and resumed hours later would merge into a tree that never checked together.
+test('verdict: past maxAgeMs a PASS answers nothing, however unrelated the moves', () => {
+  const v = { baseTip: 't1', scope: 'shared', ok: true, at: NOW - 31 * 60 * 1000 };
+  assert.equal(judge(v, { movedSince: ['docs/x.md'] }).state, 'pending');
+  assert.equal(judge({ ...v, at: undefined }).state, 'pending', 'a verdict with no time is no verdict');
+});
+
+test('verdict: a check that could not run is an error, never a fail about the merge', () => {
+  const v = { baseTip: 't2', scope: 'shared', ok: false, error: true, output: 'jq is not installed' };
+  assert.equal(judge(v).state, 'error');
+  assert.equal(judge({ ...v, baseTip: 't1' }, { movedSince: ['docs/x.md'] }).state, 'pending', 'a new tip retries');
 });
 
 test('verdict: a shared-scope PASS never answers a wide question', () => {
@@ -341,6 +367,19 @@ test('the integration check judges the MERGE RESULT, and leaves the branch alone
     assert.equal(runIntegrationCheck(s(cleanTip)), false);
     const tail = readIntegrationVerdictFile(integrationVerdictPath(common, head)).output.trim().split('\n');
     assert.equal(tail.at(-1), 'the real failure');
+    assert.equal(readIntegrationVerdictFile(integrationVerdictPath(common, head)).error, false);
+
+    // Exit 3 is "could not run" — recorded as an error, not as a broken merge.
+    CONFIG.integrationCheck = { command: `echo "jq missing"; exit ${INTEGRATION_CHECK_CANNOT_RUN}`, timeoutMs: 30_000 };
+    runIntegrationCheck(s(cleanTip));
+    assert.equal(readIntegrationVerdictFile(integrationVerdictPath(common, head)).error, true);
+
+    // A lock left by a killed run (its pid no longer exists) is taken over.
+    const lock = path.join(common, 'pr-land', 'integration.lock');
+    fs.writeFileSync(lock, '999999999');
+    CONFIG.integrationCheck = { command: 'node use.js', timeoutMs: 30_000 };
+    assert.equal(runIntegrationCheck(s(cleanTip)), true);
+    assert.equal(fs.existsSync(lock), false, 'the lock is released after the run');
     assert.equal(execSync('git rev-parse HEAD', { cwd: root }).toString().trim(), head, 'the branch did not move');
     assert.equal(execSync('git status --porcelain', { cwd: root }).toString(), '', 'the checkout is untouched');
     assert.equal(execSync('git worktree list', { cwd: root }).toString().trim().split('\n').length, 1, 'the scratch worktree is reaped');
