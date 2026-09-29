@@ -208,9 +208,13 @@ function decide(s) {
       return {
         exit: EXIT.NEEDS_HUMAN,
         why: 'CI never settled within the timeout',
-        detail:
-          'A conflicting PR is already ruled out above, so the run was dispatchable.\n' +
-          '  Investigate by hand — a lane may be starved of runners.',
+        detail: (s.checks.missing || []).length
+          ? `  Required lanes never reported: ${s.checks.missing.join(', ')}.\n` +
+            "  Either their workflow did not dispatch — check that its gate's paths still mirror\n" +
+            "  the workflow's filter — or the lane is not an unconditional job of it, or a lane\n" +
+            '  is starved of runners.'
+          : 'A conflicting PR is already ruled out above, so the run was dispatchable.\n' +
+            '  Investigate by hand — a lane may be starved of runners.',
       };
     }
     return { action: ACTION.WAIT_CHECKS, why: `checks are ${s.checks.state}` };

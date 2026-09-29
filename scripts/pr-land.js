@@ -71,8 +71,10 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //     "maxReviewRounds": 5,
 //     "roundsExhausted": "handoff",              // or "merge" — land on green at the cap
 //     "mergeMethod": "merge",                    // or "squash" / "rebase"
-//     "ciPaths": ["src/", "package.json"],       // or ["**"] when CI has no filter
-//     "requiredLanes": ["Emulators · Vitest"],   // skipped == failed for these
+//     "ciGates": [                               // one per path-filtered workflow
+//       { "workflow": "ci.yml", "paths": ["src/", "package.json"],  // or ["**"]
+//         "requiredLanes": ["Lint + Unit"] }     // skipped/missing == failed
+//     ],
 //     "hardStop": [{ "pattern": "^firestore\\.rules$", "why": "security rules" }],
 //     "sharedBlastRadius": ["packages/shared/", "pnpm-lock.yaml"],
 //     "rebaseRadius": ["firestore.rules"],       // a move here always rebases
@@ -80,6 +82,9 @@ const { decide, EXIT, ACTION } = require('./decide.js');
 //   }
 //
 // `pattern` is a JS regex SOURCE string (not /slashes/); add "flags" for /i.
+//
+// The legacy single-workflow shape — top-level `ciPaths` + `requiredLanes` — is
+// still accepted and read as ONE unnamed gate. See normalizeCiGates().
 // ---------------------------------------------------------------------------
 
 const DEFAULTS = {
@@ -97,10 +102,10 @@ const DEFAULTS = {
   // whose history keeps merge commits are both correct; which one is a property
   // of the repo, so it is data here rather than a value baked into the loop.
   mergeMethod: 'merge',
-  ciPaths: [],
-  // Lanes whose absence is itself a failure when CI covers the diff. Empty by
-  // default: naming one is a claim about a specific repo's workflows.
-  requiredLanes: [],
+  // One entry per path-filtered CI workflow. Empty by default, which reads as
+  // "CI covers nothing" — the UNVERIFIED path, never a silent green. Naming a
+  // gate or a required lane is a claim about a specific repo's workflows.
+  ciGates: [],
   hardStop: [],
   hardStopTrailerSource: '^Breaking-Client:',
   sharedBlastRadius: [],
@@ -119,6 +124,54 @@ const DEFAULTS = {
 
 const CONFIG_FILENAME = '.agents/land.config.json';
 
+const isStringList = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x.length > 0);
+
+/**
+ * The repo's CI, as a list of gates: `{ workflow, paths, requiredLanes }`.
+ *
+ * Why a list. A repo with more than one path-filtered workflow cannot be
+ * described by one path list and one lane list. Declare only the first
+ * workflow's paths and a diff touching only the second reads as UNVERIFIED and
+ * merges on review while that workflow is still running. Union both workflows'
+ * paths into one list and the first workflow's required lane is demanded on a
+ * diff that never dispatches it — every such PR wedges. A required lane is a
+ * claim about ONE workflow, so it is enforced only when that workflow's own
+ * filter matches the diff.
+ *
+ * The legacy shape (top-level `ciPaths` / `requiredLanes`) is exactly one gate,
+ * so it is read as one, with unchanged behaviour. Declaring both shapes is
+ * rejected rather than merged: which of the two was meant is not guessable.
+ */
+function normalizeCiGates(overrides) {
+  const legacy = 'ciPaths' in overrides || 'requiredLanes' in overrides;
+  if (overrides.ciGates === undefined) {
+    if (!legacy) return [];
+    return [{ workflow: null, paths: overrides.ciPaths || [], requiredLanes: overrides.requiredLanes || [] }];
+  }
+  if (legacy) {
+    throw new Error(`${CONFIG_FILENAME}: declare ciGates OR the legacy ciPaths/requiredLanes, not both`);
+  }
+  if (!Array.isArray(overrides.ciGates)) {
+    throw new Error(`${CONFIG_FILENAME}: ciGates must be an array`);
+  }
+  return overrides.ciGates.map((gate, i) => {
+    const at = `${CONFIG_FILENAME}: ciGates[${i}]`;
+    if (typeof gate?.workflow !== 'string' || !gate.workflow) {
+      throw new Error(`${at}.workflow must name the workflow file whose filter it mirrors`);
+    }
+    // An empty path list is a gate that can never match — its required lanes
+    // would be dead config that reads as protection.
+    if (!isStringList(gate.paths) || gate.paths.length === 0) {
+      throw new Error(`${at}.paths must be a non-empty list of path prefixes (or ["**"])`);
+    }
+    const requiredLanes = gate.requiredLanes ?? [];
+    if (!isStringList(requiredLanes)) {
+      throw new Error(`${at}.requiredLanes must be a list of check names`);
+    }
+    return { workflow: gate.workflow, paths: gate.paths, requiredLanes };
+  });
+}
+
 function loadConfig(repoRoot = process.cwd()) {
   const file = path.join(repoRoot, CONFIG_FILENAME);
   let overrides = {};
@@ -130,6 +183,11 @@ function loadConfig(repoRoot = process.cwd()) {
     }
   }
   const merged = { ...DEFAULTS, ...overrides };
+  merged.ciGates = normalizeCiGates(overrides);
+  // One representation from here on, so nothing downstream can read the legacy
+  // keys and disagree with the gates.
+  delete merged.ciPaths;
+  delete merged.requiredLanes;
   merged.hardStop = (merged.hardStop || []).map((rule) => ({
     why: rule.why,
     pattern: rule.pattern instanceof RegExp ? rule.pattern : new RegExp(rule.pattern, rule.flags || ''),
@@ -211,11 +269,27 @@ function hardStopHits(files, commitMessages = '', cfg = CONFIG) {
   return hits;
 }
 
-/** `["**"]` means the repo's CI has no path filter and always runs. */
-function ciCovers(files, cfg = CONFIG) {
-  if ((cfg.ciPaths || []).includes('**')) return files.length > 0;
-  return touches(files, cfg.ciPaths).length > 0;
+/** `["**"]` means that workflow has no path filter and always runs. */
+function gateCovers(gate, files) {
+  if (gate.paths.includes('**')) return files.length > 0;
+  return touches(files, gate.paths).length > 0;
 }
+
+/** The gates whose workflow this diff dispatches. */
+function gatesFor(files, cfg = CONFIG) {
+  return cfg.ciGates.filter((gate) => gateCovers(gate, files));
+}
+
+function ciCovers(files, cfg = CONFIG) {
+  return gatesFor(files, cfg).length > 0;
+}
+
+/** Required lanes of the gates this diff dispatches — and of no other gate. */
+function requiredLanesFor(files, cfg = CONFIG) {
+  return [...new Set(gatesFor(files, cfg).flatMap((gate) => gate.requiredLanes))];
+}
+
+const gateLabel = (gate) => gate.workflow || 'CI';
 
 /**
  * What the base's movement since the merge-base means for this PR — the `base`
@@ -242,9 +316,9 @@ function ciCovers(files, cfg = CONFIG) {
  * - The PR changes `rebaseRadius` while the base moved anything → integration
  *   check at scope "wide": the repo's command must cover what those paths reach.
  *
- * "Anything", not "anything `ciPaths` covers": ciPaths mirrors ONE workflow's
- * filter, and a consumer with its own workflow (a web app, a console) is outside
- * it while importing the shared code all the same. A check the other side did
+ * "Anything", not "anything a CI gate covers": each gate mirrors ONE workflow's
+ * filter, and a consumer with no gate of its own (a web app, a console) is outside
+ * all of them while importing the shared code all the same. A check the other side did
  * not need costs minutes of local time, once; a skipped one costs a broken base.
  *
  * `forced` and `blast` list the triggering files, from whichever side.
@@ -453,7 +527,7 @@ function runIdOf(link) {
  * Pure, and takes the whole check list, so it is asserted against recorded
  * fixtures rather than smoke-tested against a live PR.
  */
-function skipBlocks(check, causedRuns, ciWillRun, cfg) {
+function skipBlocks(check, causedRuns, requiredLanes) {
   const run = runIdOf(check.link);
   if (run && causedRuns.has(run)) {
     return 'a job in its own run failed or was cancelled — this lane never ran';
@@ -461,10 +535,11 @@ function skipBlocks(check, causedRuns, ciWillRun, cfg) {
   // Belt and braces for the case the run-level signal cannot see: a lane the
   // repo names as required, skipped on a diff CI is supposed to cover, in a run
   // that now looks clean (a single failed job re-run green leaves its dependent
-  // skipped from the earlier attempt). Opt-in and empty by default, so an
-  // unconfigured repo keeps today's behaviour exactly.
-  if (ciWillRun && (cfg.requiredLanes || []).includes(check.name)) {
-    return 'a required lane, skipped on a diff CI covers — it did not run';
+  // skipped from the earlier attempt). `requiredLanes` holds only the lanes of
+  // gates this diff matches, so a lane of a workflow the diff never dispatches
+  // is not in it and cannot wedge the PR.
+  if (requiredLanes.includes(check.name)) {
+    return 'a required lane, skipped on a diff its workflow covers — it did not run';
   }
   return null;
 }
@@ -475,8 +550,16 @@ function skipBlocks(check, causedRuns, ciWillRun, cfg) {
  * Skipped checks used to be filtered out BEFORE failures and pending were
  * computed, which made a cascaded skip invisible to the gate rather than merely
  * absent from a badge row. See the note above.
+ *
+ * `requiredLanes` is what `requiredLanesFor(files)` returns: the lanes this
+ * diff owes, already narrowed to the workflows it dispatches.
+ *
+ * A required lane ABSENT from the list is pending, not passed. With more than
+ * one workflow on a PR, their checks register independently, and a fast
+ * workflow can report all-green before a slower one has registered anything —
+ * without this, that moment reads as a mergeable PR.
  */
-function checksVerdict(checks, { ciWillRun = false } = {}, cfg = CONFIG) {
+function checksVerdict(checks, { requiredLanes = [] } = {}) {
   const skipped = checks.filter((c) => c.state === 'SKIPPED');
   const live = checks.filter((c) => c.state !== 'SKIPPED' && c.state !== 'NEUTRAL');
 
@@ -485,7 +568,7 @@ function checksVerdict(checks, { ciWillRun = false } = {}, cfg = CONFIG) {
   );
   const blockingSkips = skipped
     .map((c) => {
-      const why = skipBlocks(c, causedRuns, ciWillRun, cfg);
+      const why = skipBlocks(c, causedRuns, requiredLanes);
       return why ? { ...c, why } : null;
     })
     .filter(Boolean);
@@ -493,22 +576,23 @@ function checksVerdict(checks, { ciWillRun = false } = {}, cfg = CONFIG) {
   // Every check skipped and none of them suspect is still "none": a PR whose
   // diff dispatched nothing has not been verified, and `ciWillRun` decides what
   // that means.
-  if (!live.length && !blockingSkips.length) return { state: 'none', failures: [] };
+  const missing = requiredLanes.filter((lane) => !checks.some((c) => c.name === lane));
+  if (!live.length && !blockingSkips.length) return { state: 'none', failures: [], missing };
 
   const failures = [...live.filter((c) => HARD_FAILURE.includes(c.state)), ...blockingSkips];
-  if (failures.length) return { state: 'red', failures };
+  if (failures.length) return { state: 'red', failures, missing };
   const pending = live.filter((c) => STILL_RUNNING.includes(c.state));
-  return { state: pending.length ? 'pending' : 'green', failures: [] };
+  return { state: pending.length || missing.length ? 'pending' : 'green', failures: [], missing };
 }
 
-function observeChecks(pr, ciWillRun) {
+function observeChecks(pr, requiredLanes) {
   const raw = gh(['pr', 'checks', String(pr), '--json', 'name,state,link'], { allowFail: true });
   if (failed(raw)) {
     // "no checks reported" is a real answer: none have registered yet.
-    if (/no checks reported/i.test(raw.stderr)) return { state: 'none', failures: [] };
+    if (/no checks reported/i.test(raw.stderr)) return { state: 'none', failures: [], missing: requiredLanes };
     return null; // unknown
   }
-  return checksVerdict(JSON.parse(raw || '[]'), { ciWillRun });
+  return checksVerdict(JSON.parse(raw || '[]'), { requiredLanes });
 }
 
 function observeIntegration(commonDir, headSha, baseTip, scope, prFiles) {
@@ -540,10 +624,13 @@ function observe(deadlines) {
   const remoteLine = sh(`git ls-remote --heads origin ${branchName}`, { allowFail: true });
   const remoteSha = remoteLine ? remoteLine.split(/\s+/)[0] : null;
   const pr = observePr(branchName) || { state: 'unknown', reviews: [] };
-  // Computed before the checks are read, because whether CI was *meant* to run
-  // is what makes a required lane's absence meaningful.
-  const ciWillRun = ciCovers(files);
-  const checks = pr.number ? observeChecks(pr.number, ciWillRun) : { state: 'none', failures: [] };
+  // Computed before the checks are read, because which workflows were *meant*
+  // to run is what makes a required lane's absence meaningful.
+  const ciGatesHit = gatesFor(files);
+  const ciWillRun = ciGatesHit.length > 0;
+  const checks = pr.number
+    ? observeChecks(pr.number, requiredLanesFor(files))
+    : { state: 'none', failures: [], missing: [] };
 
   const gitDir = sh('git rev-parse --git-dir', { allowFail: true }) || '';
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
@@ -574,6 +661,7 @@ function observe(deadlines) {
     remoteBranchExists: Boolean(remoteSha),
     files,
     ciWillRun,
+    ciWorkflows: ciGatesHit.map(gateLabel),
     gated: hardStopHits(files, sh(`git log origin/${CONFIG.baseBranch}..HEAD --format=%B`, { allowFail: true }) || ''),
     base: movement,
     baseTip,
@@ -746,7 +834,7 @@ function act(action, s) {
       if (DRY_RUN) return log('  [dry-run] would open a PR');
       const label = ensureLabel();
       const note = s.ciWillRun
-        ? 'CI covers this diff.'
+        ? `CI covers this diff (${s.ciWorkflows.join(', ')}).`
         : "⚠ **UNVERIFIED BY CI** — no changed path matches this repo's CI filter, so no run " +
           'was dispatched. This PR is gated on review alone.';
       const body = [sh(`git log origin/${CONFIG.baseBranch}..HEAD --format='- %s'`), '', note].join('\n');
@@ -946,7 +1034,7 @@ if (require.main === module) {
 
 module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
-  loadConfig, decide, hardStopHits, ciCovers, baseMovement, touches, reviewFor,
+  loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
   checksVerdict, runIdOf,

@@ -21,7 +21,7 @@ import { execSync } from 'node:child_process';
 /** A representative consumer config — shape, not any one repo's values. */
 const cfg = loadConfig('/nonexistent-so-defaults-apply');
 Object.assign(cfg, {
-  ciPaths: ['src/', 'functions/', 'package.json', 'pnpm-lock.yaml'],
+  ciGates: [{ workflow: 'ci.yml', paths: ['src/', 'functions/', 'package.json', 'pnpm-lock.yaml'], requiredLanes: [] }],
   sharedBlastRadius: ['packages/shared/', 'pnpm-lock.yaml'],
   hardStop: [
     { pattern: /^firestore\.rules$/, why: 'security rules' },
@@ -193,16 +193,16 @@ test('a shared-only move is checked at scope "shared"', () => {
   assert.equal(baseMovement(['packages/shared/x.ts'], ['src/A.tsx'], withCheck).scope, 'shared');
 });
 
-// ciPaths mirrors ONE workflow's filter; a consumer with its own workflow (a web
-// app) sits outside it while importing the shared code. The review of #1123
+// Each ciGates entry mirrors ONE workflow's filter; a consumer with no gate of its
+// own (a web app) sits outside all of them while importing the shared code. The review of #1123
 // found web-only PRs merging past shared moves unchecked because of it.
-test('staleness: any move on the other side counts — not only what ciPaths covers', () => {
+test('staleness: any move on the other side counts — not only what a CI gate covers', () => {
   const withCheck = { ...cfg, sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
   assert.equal(baseMovement(['packages/shared/x.ts'], ['apps/web/page.tsx'], withCheck).needsIntegrationCheck, true);
   assert.equal(baseMovement(['apps/web/page.tsx'], ['packages/shared/x.ts'], withCheck).needsIntegrationCheck, true);
 });
 
-test('staleness: with no ciPaths declared, any change on the other side counts', () => {
+test('staleness: with no ciGates declared, any change on the other side counts', () => {
   const bare = { ...loadConfig('/nonexistent'), sharedBlastRadius: ['packages/shared/'], integrationCheck: { command: 'true', timeoutMs: 1000 } };
   assert.equal(baseMovement(['docs/x.md'], ['packages/shared/x.ts'], bare).needsIntegrationCheck, true);
 });
@@ -409,9 +409,8 @@ test('exit codes are stable — agents branch on these', () => {
   });
 });
 
-test('ciPaths ["**"] means the repo has no path filter and CI always runs', () => {
-  const all = loadConfig('/nonexistent');
-  all.ciPaths = ['**'];
+test('paths ["**"] means the workflow has no path filter and always runs', () => {
+  const all = loadConfig(repoWithConfig({ ciGates: [{ workflow: 'ci.yml', paths: ['**'] }] }));
   assert.equal(ciCovers(['docs/anything.md'], all), true);
   assert.equal(ciCovers([], all), false, 'an empty diff still covers nothing');
 });
@@ -434,7 +433,7 @@ test('ciPaths ["**"] means the repo has no path filter and CI always runs', () =
 // sits in is what separates them.
 // ---------------------------------------------------------------------------
 
-const { checksVerdict, runIdOf } = require('../pr-land.js');
+const { checksVerdict, runIdOf, gatesFor, requiredLanesFor } = require('../pr-land.js');
 
 const CI_RUN = 'https://github.com/ordago-app/ordago-apps/actions/runs/33126802372/job/';
 const WEB_RUN = 'https://github.com/ordago-app/ordago-apps/actions/runs/33126802218/job/';
@@ -459,7 +458,7 @@ test('runIdOf reads the run out of a check link', () => {
 });
 
 test('a dependency-cascade skip blocks; a path-filtered skip in a clean run does not', () => {
-  const v = checksVerdict(pr777, { ciWillRun: true }, cfg);
+  const v = checksVerdict(pr777, {});
   assert.equal(v.state, 'red');
   assert.deepEqual(named(v), [
     'Emulators · Vitest (functions) + E2E (shared)',
@@ -471,7 +470,7 @@ test('a dependency-cascade skip blocks; a path-filtered skip in a clean run does
 });
 
 test('a blocking skip says why, so the log does not read as a mystery', () => {
-  const v = checksVerdict(pr777, { ciWillRun: true }, cfg);
+  const v = checksVerdict(pr777, {});
   const em = v.failures.find((c) => c.name.startsWith('Emulators'));
   assert.match(em.why, /failed or was cancelled/);
   // A genuine failure is reported as itself, not dressed up as a skip.
@@ -486,7 +485,7 @@ test('the incident: a skipped required suite alone is red, not green', () => {
     { name: 'Lint + Unit (app · shared · functions)', state: 'CANCELLED', link: CI_RUN + '1' },
     { name: 'Emulators · Vitest (functions) + E2E (shared)', state: 'SKIPPED', link: CI_RUN + '2' },
     { name: 'Detect affected areas', state: 'SUCCESS', link: CI_RUN + '3' },
-  ], { ciWillRun: true }, cfg);
+  ], {});
   assert.equal(v.state, 'red');
   assert.deepEqual(named(v), ['Emulators · Vitest (functions) + E2E (shared)']);
 });
@@ -496,7 +495,7 @@ test('an all-green run with only by-design skips is still green', () => {
     { name: 'Next.js lint + build', state: 'SUCCESS', link: WEB_RUN + '1' },
     { name: 'Build image + deploy to Cloud Run', state: 'SKIPPED', link: WEB_RUN + '2' },
     { name: 'Lint + Unit (app · shared · functions)', state: 'SUCCESS', link: CI_RUN + '1' },
-  ], { ciWillRun: true }, cfg);
+  ], {});
   assert.equal(v.state, 'green');
   assert.deepEqual(v.failures, []);
 });
@@ -508,7 +507,7 @@ test('a skip is judged by its own run, not by any red anywhere on the PR', () =>
     { name: 'Lint + Unit (app · shared · functions)', state: 'FAILURE', link: CI_RUN + '1' },
     { name: 'Build image + deploy to Cloud Run', state: 'SKIPPED', link: WEB_RUN + '2' },
     { name: 'Next.js lint + build', state: 'SUCCESS', link: WEB_RUN + '1' },
-  ], { ciWillRun: true }, cfg);
+  ], {});
   assert.deepEqual(named(v), ['Lint + Unit (app · shared · functions)']);
 });
 
@@ -516,7 +515,7 @@ test('pending is still pending when the only skips are legitimate', () => {
   const v = checksVerdict([
     { name: 'Emulators · Vitest (functions) + E2E (shared)', state: 'QUEUED', link: CI_RUN + '1' },
     { name: 'Build image + deploy to Cloud Run', state: 'SKIPPED', link: WEB_RUN + '2' },
-  ], { ciWillRun: true }, cfg);
+  ], {});
   assert.equal(v.state, 'pending');
 });
 
@@ -526,20 +525,20 @@ test('a diff that dispatched nothing is `none`, not red', () => {
   const v = checksVerdict([
     { name: 'Build image + deploy to Cloud Run', state: 'SKIPPED', link: WEB_RUN + '2' },
     { name: 'Emulators · Vitest (functions) + E2E (shared)', state: 'SKIPPED', link: CI_RUN + '2' },
-  ], { ciWillRun: false }, cfg);
+  ], {});
   assert.equal(v.state, 'none');
   assert.deepEqual(v.failures, []);
 });
 
 test('NEUTRAL is still ignored, and an empty list is still `none`', () => {
-  assert.equal(checksVerdict([], {}, cfg).state, 'none');
+  assert.equal(checksVerdict([]).state, 'none');
   assert.equal(
-    checksVerdict([{ name: 'advisory', state: 'NEUTRAL', link: CI_RUN + '1' }], {}, cfg).state,
+    checksVerdict([{ name: 'advisory', state: 'NEUTRAL', link: CI_RUN + '1' }]).state,
     'none',
   );
 });
 
-test('requiredLanes is opt-in: unconfigured repos keep exactly today’s behaviour', () => {
+test('requiredLanes is opt-in: an empty list keeps the run-level rule alone', () => {
   const stale = [
     // The residual case the run-level signal cannot see: the failed upstream was
     // re-run green, leaving its dependent skipped from the earlier attempt. The
@@ -547,13 +546,135 @@ test('requiredLanes is opt-in: unconfigured repos keep exactly today’s behavio
     { name: 'Lint + Unit (app · shared · functions)', state: 'SUCCESS', link: CI_RUN + '1' },
     { name: 'Emulators · Vitest (functions) + E2E (shared)', state: 'SKIPPED', link: CI_RUN + '2' },
   ];
-  assert.equal(checksVerdict(stale, { ciWillRun: true }, cfg).state, 'green');
+  assert.equal(checksVerdict(stale).state, 'green');
 
-  const guarded = { ...cfg, requiredLanes: ['Emulators · Vitest (functions) + E2E (shared)'] };
-  const v = checksVerdict(stale, { ciWillRun: true }, guarded);
+  const v = checksVerdict(stale, { requiredLanes: ['Emulators · Vitest (functions) + E2E (shared)'] });
   assert.equal(v.state, 'red');
   assert.match(v.failures[0].why, /required lane/);
+});
 
-  // And a required lane is only required when CI was meant to run at all.
-  assert.equal(checksVerdict(stale, { ciWillRun: false }, guarded).state, 'green');
+// ---------------------------------------------------------------------------
+// ciGates — one gate per path-filtered workflow.
+//
+// The shape of ordago-app/ordago-apps, where it was needed: develop-tests.yml
+// covers the app/shared/functions tree, console-ci.yml covers only
+// apps/ordago-console/. With one ciPaths list, PRs #1053 and #1054 (console
+// only) read as UNVERIFIED and merged on review while console CI still ran —
+// and adding the console path to that list would have demanded the
+// develop-tests lane on diffs that never dispatch it.
+// ---------------------------------------------------------------------------
+
+const MAIN_LANE = 'Lint + Unit (app · shared · functions)';
+const CONSOLE_LANE = 'Lint + typecheck + unit (ordago-console)';
+const CONSOLE_RUN = 'https://github.com/ordago-app/ordago-apps/actions/runs/40000000001/job/';
+
+const gated = loadConfig(repoWithConfig({
+  ciGates: [
+    { workflow: 'develop-tests.yml', paths: ['apps/ordago-app/', 'packages/shared/', 'pnpm-lock.yaml'], requiredLanes: [MAIN_LANE] },
+    { workflow: 'console-ci.yml', paths: ['apps/ordago-console/', 'pnpm-lock.yaml'], requiredLanes: [CONSOLE_LANE] },
+  ],
+}));
+
+const forDiff = (files) => ({ requiredLanes: requiredLanesFor(files, gated) });
+
+test('ciGates: a console-only diff is covered, and owes only the console lane', () => {
+  const files = ['apps/ordago-console/src/page.tsx'];
+  assert.equal(ciCovers(files, gated), true);
+  assert.deepEqual(gatesFor(files, gated).map((g) => g.workflow), ['console-ci.yml']);
+  assert.deepEqual(requiredLanesFor(files, gated), [CONSOLE_LANE]);
+});
+
+test('ciGates: a console-only diff waits for the console lane before it registers', () => {
+  // Nothing reported yet, and then only a hosted sibling: neither is green.
+  assert.equal(checksVerdict([], forDiff(['apps/ordago-console/a.ts'])).state, 'none');
+  const early = checksVerdict([
+    { name: 'Container build (build stage only)', state: 'SUCCESS', link: CONSOLE_RUN + '1' },
+  ], forDiff(['apps/ordago-console/a.ts']));
+  assert.equal(early.state, 'pending');
+  assert.deepEqual(early.missing, [CONSOLE_LANE]);
+});
+
+test('ciGates: a console-only diff is not wedged by the develop-tests lane it never dispatches', () => {
+  const v = checksVerdict([
+    { name: CONSOLE_LANE, state: 'SUCCESS', link: CONSOLE_RUN + '1' },
+    { name: 'Container build (build stage only)', state: 'SUCCESS', link: CONSOLE_RUN + '2' },
+  ], forDiff(['apps/ordago-console/a.ts']));
+  assert.equal(v.state, 'green');
+  assert.deepEqual(v.missing, []);
+});
+
+test('ciGates: a mixed diff owes both lanes, and is pending until both report', () => {
+  const files = ['apps/ordago-console/a.ts', 'packages/shared/src/b.ts'];
+  assert.deepEqual(requiredLanesFor(files, gated).sort(), [CONSOLE_LANE, MAIN_LANE].sort());
+
+  const oneDone = checksVerdict([
+    { name: MAIN_LANE, state: 'SUCCESS', link: CI_RUN + '1' },
+  ], forDiff(files));
+  assert.equal(oneDone.state, 'pending', 'a fast workflow green is not the PR green');
+  assert.deepEqual(oneDone.missing, [CONSOLE_LANE]);
+
+  const both = checksVerdict([
+    { name: MAIN_LANE, state: 'SUCCESS', link: CI_RUN + '1' },
+    { name: CONSOLE_LANE, state: 'SUCCESS', link: CONSOLE_RUN + '1' },
+  ], forDiff(files));
+  assert.equal(both.state, 'green');
+});
+
+test('ciGates: a path shared by two gates dispatches both, and owes both lanes', () => {
+  assert.deepEqual(requiredLanesFor(['pnpm-lock.yaml'], gated).sort(), [CONSOLE_LANE, MAIN_LANE].sort());
+});
+
+test('ciGates: a skipped required lane of a matching gate still fails', () => {
+  const v = checksVerdict([
+    { name: CONSOLE_LANE, state: 'SKIPPED', link: CONSOLE_RUN + '1' },
+    { name: 'Container build (build stage only)', state: 'SUCCESS', link: CONSOLE_RUN + '2' },
+  ], forDiff(['apps/ordago-console/a.ts']));
+  assert.equal(v.state, 'red');
+  assert.deepEqual(named(v), [CONSOLE_LANE]);
+  assert.match(v.failures[0].why, /required lane/);
+});
+
+test('ciGates: a skipped lane of a gate the diff does not match is not required', () => {
+  // The app-only diff: console-ci.yml never dispatches, so its lane showing up
+  // SKIPPED (or not at all) says nothing about this PR.
+  const v = checksVerdict([
+    { name: MAIN_LANE, state: 'SUCCESS', link: CI_RUN + '1' },
+    { name: CONSOLE_LANE, state: 'SKIPPED', link: CONSOLE_RUN + '1' },
+  ], forDiff(['apps/ordago-app/screens/Home.tsx']));
+  assert.equal(v.state, 'green');
+});
+
+test('ciGates: a docs-only diff matches no gate and owes nothing — still UNVERIFIED', () => {
+  assert.equal(ciCovers(['docs/x.md'], gated), false);
+  assert.deepEqual(requiredLanesFor(['docs/x.md'], gated), []);
+});
+
+test('legacy ciPaths/requiredLanes load as one gate with unchanged behaviour', () => {
+  const legacy = loadConfig(repoWithConfig({ ciPaths: ['src/'], requiredLanes: [MAIN_LANE] }));
+  assert.deepEqual(legacy.ciGates, [{ workflow: null, paths: ['src/'], requiredLanes: [MAIN_LANE] }]);
+  assert.equal('ciPaths' in legacy, false, 'one representation after load');
+
+  assert.equal(ciCovers(['src/a.ts'], legacy), true);
+  assert.equal(ciCovers(['docs/a.md'], legacy), false);
+  assert.deepEqual(requiredLanesFor(['src/a.ts'], legacy), [MAIN_LANE]);
+  assert.deepEqual(requiredLanesFor(['docs/a.md'], legacy), [], 'no CI, no required lane');
+
+  const skipped = checksVerdict([
+    { name: 'other', state: 'SUCCESS', link: CI_RUN + '1' },
+    { name: MAIN_LANE, state: 'SKIPPED', link: CI_RUN + '2' },
+  ], { requiredLanes: requiredLanesFor(['src/a.ts'], legacy) });
+  assert.equal(skipped.state, 'red');
+
+  const legacyAll = loadConfig(repoWithConfig({ ciPaths: ['**'] }));
+  assert.equal(ciCovers(['anything.md'], legacyAll), true);
+});
+
+test('ciGates: malformed or ambiguous config is rejected at load', () => {
+  const bad = (c) => () => loadConfig(repoWithConfig(c));
+  assert.throws(bad({ ciGates: [{ workflow: 'a.yml', paths: ['x/'] }], ciPaths: ['y/'] }), /not both/);
+  assert.throws(bad({ ciGates: {} }), /must be an array/);
+  assert.throws(bad({ ciGates: [{ paths: ['x/'] }] }), /workflow/);
+  assert.throws(bad({ ciGates: [{ workflow: 'a.yml', paths: [] }] }), /paths/);
+  assert.throws(bad({ ciGates: [{ workflow: 'a.yml', paths: ['x/'], requiredLanes: 'Lint' }] }), /requiredLanes/);
+  assert.deepEqual(loadConfig(repoWithConfig({ ciGates: [{ workflow: 'a.yml', paths: ['x/'] }] })).ciGates[0].requiredLanes, []);
 });
