@@ -1,31 +1,44 @@
 # AGENTS.md — agent-skills
 
-The autonomous delivery contract (`skills/ship-a-feature/SKILL.md`) and the landing state
-machine behind it (`scripts/pr-land.js`, with its decision table in `scripts/decide.js`).
-`README.md` explains the wiring and every `.agents/land.config.json` field.
+The autonomous delivery contract (`skills/ship-a-feature/SKILL.md`), the landing state
+machine behind it (`scripts/pr-land.js`, with its decision table in `scripts/decide.js`),
+and the parallel-batch layer on top: `skills/orchestrate`, `skills/advance-ongoing-plans`,
+`scripts/plans-map.js` and `scripts/agent-env.sh`. `README.md` explains the wiring and every
+field of `.agents/land.config.json` and `.agents/orchestrate.config.json`.
 
 ## Edits propagate to consumers
 
 Other projects consume this repo as a git submodule at `.agents/_shared/`, symlinking
-`skills/ship-a-feature` and `scripts/pr-land.js` into place; some vendor a copy of
+its skills and scripts into place; some vendor a copy of
 `pr-land.js` and `decide.js` instead. A change here reaches every consumer on its next
 submodule bump, so treat each one as a change to all of them.
 
 ## Rules
 
 - **Procedure only.** Every project fact (Direct paths, hard-stop list, base branch,
-  whether an approving review is required) belongs in the consuming repo's `AGENTS.md`
-  and `.agents/land.config.json`, which win where they differ. If an edit here would only
+  whether an approving review is required, session names, worker counts) belongs in the
+  consuming repo's `AGENTS.md`, `.agents/land.config.json` and
+  `.agents/orchestrate.config.json`, which win where they differ. A skill names a fact
+  by the config key that holds it, never by one repo's value. If an edit here would only
   make one repo happy, put that value in that repo's config instead.
 - Defaults fail closed: an absent config means an empty hard-stop list and
   `requireApprovingReview: true`. Keep it that way.
-- The scripts use Node built-ins only; there is no `package.json`.
+- The scripts use Node built-ins only; there is no `package.json`. `agent-env.sh` needs
+  git, jq and perl.
+- **Scripts resolve the consuming repo from the working directory** (`git rev-parse
+  --show-toplevel`), never from their own location: consumers reach them through a symlink
+  into the submodule, where `__dirname` is the submodule.
 - `managing-plans-lifecycle` moved to agent-plans. Don't re-add it here.
 
 ## Layout
 
-- `skills/ship-a-feature/SKILL.md`: the only skill.
+- `skills/ship-a-feature/SKILL.md`: the single-task delivery contract.
+- `skills/orchestrate/SKILL.md`, `skills/advance-ongoing-plans/SKILL.md`: the leader
+  contract for parallel worker sessions, and its cycle-drain variant.
 - `scripts/pr-land.js`, `scripts/decide.js`: the landing loop (run as `pnpm pr:land` in consumers).
+- `scripts/plans-map.js`: the plans map generator and block validator (agent-plans v2 spec).
+- `scripts/agent-env.sh`, `scripts/lib/agent-slots.sh`: per-worktree slot allocation.
+- `templates/plans-map.yml`: the workflow consumers copy.
 - `scripts/__tests__/*.test.mjs`: tests.
 - `.claude-plugin/plugin.json`: plugin manifest, though this repo is no longer a plugin
   marketplace and its description still mentions the plans lifecycle.
