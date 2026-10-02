@@ -1,8 +1,9 @@
 # agent-skills
 
-The autonomous delivery contract (`ship-a-feature`) and the landing state machine behind
-it (`scripts/pr-land.js`), consumed by multiple projects as a git submodule so a single
-copy is the source of truth.
+The autonomous delivery contract (`ship-a-feature`), the landing state machine behind it
+(`scripts/pr-land.js`), and the parallel-batch layer on top (`orchestrate`,
+`advance-ongoing-plans`, with the plans map and per-worktree slots they need), consumed by
+multiple projects as a git submodule so a single copy is the source of truth.
 
 > **`managing-plans-lifecycle` has moved** to
 > [agent-plans](https://github.com/alvaro-francisco-gil/agent-plans), where it ships as a
@@ -20,11 +21,29 @@ copy is the source of truth.
   message, take `go` as "all your picks", then implement and land unattended. Supersedes
   `superpowers:brainstorming`'s one-question-per-message rule and
   `finishing-a-development-branch`'s stop-and-ask merge menu in adopting repos.
+- **orchestrate** — one leader session supervising several worker sessions (tmux windows +
+  worktrees) to landed PRs: one decision with the user, durable batch state, an escalation
+  contract. Each worker runs the `ship-a-feature` loop.
+- **advance-ongoing-plans** — an `orchestrate` batch whose pool is `docs/plans/ongoing/`
+  and whose finish line is the map, not a PR count: no `go`, the leader dispatches and asks
+  only for unlocks, until no ongoing plan reads `Gate: none`.
 
 **Scripts**
 
 - **scripts/pr-land.js** — the landing state machine behind `pnpm pr:land`. Shared verbatim;
   every repo-specific value is data in that repo's `.agents/land.config.json`.
+- **scripts/plans-map.js** — generates `docs/plans/_plans-map.md` from the metadata block
+  that [agent-plans](https://github.com/alvaro-francisco-gil/agent-plans) v2 puts under every
+  plan's title, and validates those blocks. The leader's first read.
+- **scripts/agent-env.sh** (+ `lib/agent-slots.sh`) — gives each agent worktree its own
+  slot: a block of 100 ports, a `firebase.agent.json` with every emulator moved into it, and
+  a one-time setup (submodules, dependency install). Without it, two workers' emulator test
+  runs silently evict each other.
+
+**Templates**
+
+- **templates/plans-map.yml** — the CI workflow that validates plan blocks on PRs and
+  regenerates the map on the base branch. Copied, not linked: a workflow cannot be a symlink.
 
 ## The layering rule
 
@@ -155,6 +174,67 @@ review gate rather than silently auto-merging something it never declared.
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.
 - With no reviewer bot, also set `"reviewLabel": null`, so the loop does not create a label
   nothing listens to.
+
+### Adding the orchestration layer
+
+`orchestrate` and `advance-ongoing-plans` sit on top of `ship-a-feature`, so wire that first.
+Then:
+
+```sh
+ln -s ../_shared/skills/orchestrate           .agents/skills/orchestrate
+ln -s ../_shared/skills/advance-ongoing-plans .agents/skills/advance-ongoing-plans
+ln -s ../.agents/_shared/scripts/plans-map.js scripts/plans-map.js
+ln -s ../.agents/_shared/scripts/agent-env.sh scripts/agent-env.sh
+cp .agents/_shared/templates/plans-map.yml .github/workflows/plans-map.yml   # set the base branch
+echo 'firebase.agent.json' >> .gitignore
+```
+
+Add `"plans:map": "node scripts/plans-map.js"` to `package.json`, then:
+
+1. **`.agents/orchestrate.config.json`** — the fleet facts the skills and `agent-env.sh` read:
+
+   ```json
+   {
+     "project": "myrepo",
+     "maxWorkers": 4,
+     "maxConcurrentEmulatorSuites": 2,
+     "worktreesDir": ".claude/worktrees",
+     "worktreeSetup": ["pnpm install --frozen-lockfile --prefer-offline"],
+     "ciCapacity": "one line: what limits how many PRs CI can admit at once"
+   }
+   ```
+
+   - `project` names the leader sessions (`<project>-orchestrator`, `<project>-drain`) and
+     the tmux session (`<project>-fleet`). Without the file the skills refuse to start.
+   - `worktreeSetup` runs once per fresh worktree, in it, after submodule init. A fresh
+     worktree has no `node_modules`; **never symlink the main checkout's in** — a workspace
+     package link is relative, so the worktree would silently test the main checkout's source.
+   - `maxConcurrentEmulatorSuites` is the machine's ceiling, measured, not guessed (two on a
+     16 GB WSL2 host).
+
+2. **Plan metadata blocks** per agent-plans v2 (`**Priority:**` on every plan;
+   `**Gate:** / **Next:**` in `ongoing/`). If the repo deploys, add the exact line
+   `<!-- plans:landed -->` to its `AGENTS.md`, and every ongoing plan then also needs
+   `**Landed:**`. Run `node scripts/plans-map.js --validate` until it passes, then
+   generate the map once and commit it.
+
+3. **Make the emulator test harness slot-aware.** `agent-env.sh` writes
+   `firebase.agent.json` beside `firebase.json`; the harness must start the emulators from
+   that file when it exists and point the tests at its ports. The file — not an exported
+   variable — carries the slot, because agent shells (Claude Code's Bash tool among them) do
+   not keep environment variables between commands. Any test that hardcodes a port instead
+   of reading `FIRESTORE_EMULATOR_HOST` and friends has to change too.
+
+4. **The regenerate job pushes to the base branch** as `github-actions[bot]`. If that branch
+   is protected against direct pushes, allow the bot, or the map never updates.
+
+Verify:
+
+```sh
+node --test .agents/_shared/scripts/__tests__/*.test.mjs
+node scripts/plans-map.js --validate
+(cd .claude/worktrees/<any> && source scripts/agent-env.sh)   # prints the slot's ports
+```
 
 ### Wiring the reviewer: a public repo cannot use the immediate trigger
 
