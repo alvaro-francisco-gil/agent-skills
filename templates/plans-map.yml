@@ -82,7 +82,9 @@ jobs:
       - name: Commit the regenerated map
         run: |
           set -euo pipefail
-          if git diff --quiet -- docs/plans/_plans-map.md; then
+          # `git status`, not `git diff --quiet`: diff ignores untracked files, so the
+          # FIRST map — a new file — read as "in sync" and was never committed.
+          if [ -z "$(git status --porcelain -- docs/plans/_plans-map.md)" ]; then
             echo "map already in sync — nothing to commit"
             exit 0
           fi
