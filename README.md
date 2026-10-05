@@ -1,8 +1,8 @@
 # agent-skills
 
 The autonomous delivery contract (`ship-a-feature`), the landing state machine behind it
-(`scripts/pr-land.js`), and the parallel-batch layer on top (`orchestrate`,
-`advance-ongoing-plans`, with the plans map and per-worktree slots they need), consumed by
+(`scripts/pr-land.js`), and the parallel-batch layer on top (`orchestrate`, `advance-plans`,
+`review-ideas`, with the plans map, per-worktree slots and fleet scripts they need), consumed by
 multiple projects as a git submodule so a single copy is the source of truth.
 
 > **`managing-plans-lifecycle` has moved** to
@@ -24,9 +24,13 @@ multiple projects as a git submodule so a single copy is the source of truth.
 - **orchestrate** — one leader session supervising several worker sessions (tmux windows +
   worktrees) to landed PRs: one decision with the user, durable batch state, an escalation
   contract. Each worker runs the `ship-a-feature` loop.
-- **advance-ongoing-plans** — an `orchestrate` batch whose pool is `docs/plans/ongoing/`
-  and whose finish line is the map, not a PR count: no `go`, the leader dispatches and asks
-  only for unlocks, until no ongoing plan reads `Gate: none`.
+- **advance-plans** — an `orchestrate` batch that builds everything already approved —
+  `ongoing/`, then `ready/`, then ideas the repo's `## Approval` policy pre-approves — and
+  whose finish line is the map, not a PR count: no `go`, the leader dispatches and asks only
+  for unlocks and product questions, until nothing agents can move is left.
+- **review-ideas** — checks `docs/plans/ideas/` against the code with read-only scouts,
+  oldest-reviewed first, fixes or retires what is false, and asks the user for the yeses
+  that move ideas to `ready/`. Docs only; no PRs except one for ideas pinned by code.
 
 **Scripts**
 
@@ -39,6 +43,23 @@ multiple projects as a git submodule so a single copy is the source of truth.
   slot: a block of 100 ports, a `firebase.agent.json` with every emulator moved into it, and
   a one-time setup (submodules, dependency install). Without it, two workers' emulator test
   runs silently evict each other.
+- **scripts/agent-capacity.js** — admit one more worker or not (exit 0/2), from free RAM,
+  running emulator suites and, if declared, a self-hosted CI queue. Replaces a worker count.
+- **scripts/agent-dispatch.sh** — one worker: worktree off a fetched `origin/<base>` with its
+  submodule, its own `<project>-fleet` tmux window, `claude` launched in auto mode with peer
+  messages accepted, startup dialogs answered, the run confirmed started.
+- **scripts/pr-land-bg.sh** — runs `pnpm pr:land` in a tmux session that survives, and
+  stops only this worktree's lander (`--kill`), never another's.
+- **scripts/ideas-review-order.js** — ideas by last review, oldest first, from git history
+  and `Reviewed-Idea:` trailers. `review-ideas`' queue.
+- **scripts/agent-auto-mode.js** — installs the repo's `.agents/auto-mode.json` policy into
+  the user's Claude Code settings (see *Auto-mode policy*).
+
+**Hooks**
+
+- **hooks/guard-lander-kill.sh** — a `PreToolUse(Bash)` hook refusing pattern-wide kills
+  (`pkill -f`, `killall`, `pgrep -f … | xargs kill`) that name a lander. One such kill
+  takes out every worktree's `pr:land` on the machine.
 
 **Templates**
 
@@ -177,19 +198,26 @@ review gate rather than silently auto-merging something it never declared.
 
 ### Adding the orchestration layer
 
-`orchestrate` and `advance-ongoing-plans` sit on top of `ship-a-feature`, so wire that first.
-Then:
+`orchestrate`, `advance-plans` and `review-ideas` sit on top of `ship-a-feature`, so wire
+that first. Then:
 
 ```sh
-ln -s ../_shared/skills/orchestrate           .agents/skills/orchestrate
-ln -s ../_shared/skills/advance-ongoing-plans .agents/skills/advance-ongoing-plans
-ln -s ../.agents/_shared/scripts/plans-map.js scripts/plans-map.js
-ln -s ../.agents/_shared/scripts/agent-env.sh scripts/agent-env.sh
+for s in orchestrate advance-plans review-ideas; do ln -s ../_shared/skills/$s .agents/skills/$s; done
+for f in plans-map.js agent-env.sh agent-capacity.js agent-dispatch.sh pr-land-bg.sh \
+         ideas-review-order.js agent-auto-mode.js; do
+  ln -s ../.agents/_shared/scripts/$f scripts/$f
+done
+mkdir -p .claude/hooks && ln -s ../../.agents/_shared/hooks/guard-lander-kill.sh .claude/hooks/guard-lander-kill.sh
 cp .agents/_shared/templates/plans-map.yml .github/workflows/plans-map.yml   # set the base branch
 echo 'firebase.agent.json' >> .gitignore
 ```
 
-Add `"plans:map": "node scripts/plans-map.js"` to `package.json`, then:
+Add to `package.json`: `"plans:map": "node scripts/plans-map.js"`,
+`"agent:capacity": "node scripts/agent-capacity.js"`,
+`"agent:dispatch": "bash scripts/agent-dispatch.sh"`,
+`"agent:auto-mode": "node scripts/agent-auto-mode.js"`. Register the hook in
+`.claude/settings.json` as a `PreToolUse` hook with matcher `Bash` and command
+`$CLAUDE_PROJECT_DIR/.claude/hooks/guard-lander-kill.sh` (it needs `jq`). Then:
 
 1. **`.agents/orchestrate.config.json`** — the fleet facts the skills and `agent-env.sh` read:
 
@@ -204,8 +232,11 @@ Add `"plans:map": "node scripts/plans-map.js"` to `package.json`, then:
    }
    ```
 
-   - `project` names the leader sessions (`<project>-orchestrator`, `<project>-drain`) and
+   - `project` names the leader sessions (`<project>-orchestrator`, `<project>-build`) and
      the tmux session (`<project>-fleet`). Without the file the skills refuse to start.
+   - `capacity` (optional) tunes `agent-capacity.js`: `minAvailableMb` (default 3000), and
+     `ciQueue: { "runnerLabel": "self-hosted", "maxMinutes": 30 }` when CI runs on
+     self-hosted runners whose queue should hold dispatches back. Hosted runners: omit it.
    - `worktreeSetup` runs once per fresh worktree, in it, after submodule init. A fresh
      worktree has no `node_modules`; **never symlink the main checkout's in** — a workspace
      package link is relative, so the worktree would silently test the main checkout's source.
@@ -225,7 +256,12 @@ Add `"plans:map": "node scripts/plans-map.js"` to `package.json`, then:
    not keep environment variables between commands. Any test that hardcodes a port instead
    of reading `FIRESTORE_EMULATOR_HOST` and friends has to change too.
 
-4. **The regenerate job pushes to the base branch** as `github-actions[bot]`. If that branch
+4. **An `## Approval` section in `AGENTS.md`** — what agents may start without asking
+   (pre-approved idea classes), what needs the user's yes, and which environments only the
+   user may write to. `advance-plans` builds pre-approved ideas from it, `review-ideas`
+   classes ideas by it, and both treat a repo without it as "nothing is pre-approved".
+
+5. **The regenerate job pushes to the base branch** as `github-actions[bot]`. If that branch
    is protected against direct pushes, allow the bot, or the map never updates.
 
 Verify:
@@ -235,6 +271,33 @@ node --test .agents/_shared/scripts/__tests__/*.test.mjs
 node scripts/plans-map.js --validate
 (cd .claude/worktrees/<any> && source scripts/agent-env.sh)   # prints the slot's ports
 ```
+
+### Auto-mode policy
+
+Workers run `claude --permission-mode auto`, so Claude Code's permission classifier judges
+every command they and the leader run. It reads `autoMode` only from user, `--settings`
+and managed settings — **never from a repo's own `.claude/settings*.json`**, since a cloned
+repo must not be able to widen its own permissions. So the repo states its policy in
+`.agents/auto-mode.json`, and each person who runs agents installs it:
+
+```json
+{
+  "tag": "myrepo",
+  "allow": ["Sending keystrokes with `tmux send-keys` to windows of the `myrepo-fleet` tmux session is allowed: …"],
+  "soft_deny": [],
+  "environment": ["**Trusted repo**: github.com/me/myrepo … `develop` is the integration branch …"]
+}
+```
+
+```sh
+pnpm agent:auto-mode            # show what would change in ~/.claude/settings.json
+pnpm agent:auto-mode --write    # back it up, then apply
+```
+
+Every entry is installed prefixed `[<tag>] ` (default: the repo's directory name), and a
+re-run replaces exactly that repo's entries — several repos' policies and the person's own
+rules coexist. Keep the file a restatement of `AGENTS.md`'s `## Approval` and autonomy
+rules, never a looser one: the classifier is what enforces them for an unattended fleet.
 
 ### Wiring the reviewer: a public repo cannot use the immediate trigger
 
