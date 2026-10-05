@@ -2,8 +2,10 @@
 
 The autonomous delivery contract (`skills/ship-a-feature/SKILL.md`), the landing state
 machine behind it (`scripts/pr-land.js`, with its decision table in `scripts/decide.js`),
-and the parallel-batch layer on top: `skills/orchestrate`, `skills/advance-ongoing-plans`,
-`scripts/plans-map.js` and `scripts/agent-env.sh`. `README.md` explains the wiring and every
+and the parallel-batch layer on top: `skills/orchestrate`, `skills/advance-plans`,
+`skills/review-ideas`, `scripts/plans-map.js`, `scripts/agent-env.sh` and the fleet scripts
+(`agent-capacity.js`, `agent-dispatch.sh`, `pr-land-bg.sh`, `ideas-review-order.js`,
+`agent-auto-mode.js`), plus `hooks/guard-lander-kill.sh`. `README.md` explains the wiring and every
 field of `.agents/land.config.json` and `.agents/orchestrate.config.json`.
 
 ## Edits propagate to consumers
@@ -33,11 +35,17 @@ submodule bump, so treat each one as a change to all of them.
 ## Layout
 
 - `skills/ship-a-feature/SKILL.md`: the single-task delivery contract.
-- `skills/orchestrate/SKILL.md`, `skills/advance-ongoing-plans/SKILL.md`: the leader
-  contract for parallel worker sessions, and its cycle-drain variant.
+- `skills/orchestrate/SKILL.md`: the leader contract for parallel worker sessions.
+- `skills/advance-plans/SKILL.md`: builds the approved pool on top of `orchestrate`.
+- `skills/review-ideas/SKILL.md`: verifies `ideas/` against the code and asks for yeses.
 - `scripts/pr-land.js`, `scripts/decide.js`: the landing loop (run as `pnpm pr:land` in consumers).
 - `scripts/plans-map.js`: the plans map generator and block validator (agent-plans v2 spec).
 - `scripts/agent-env.sh`, `scripts/lib/agent-slots.sh`: per-worktree slot allocation.
+- `scripts/agent-capacity.js`, `scripts/agent-dispatch.sh`, `scripts/pr-land-bg.sh`: admit,
+  launch and land a worker.
+- `scripts/ideas-review-order.js`: `review-ideas`' queue.
+- `scripts/agent-auto-mode.js`: installs a repo's `.agents/auto-mode.json` classifier policy.
+- `hooks/guard-lander-kill.sh`: `PreToolUse` guard against pattern-wide lander kills.
 - `templates/plans-map.yml`: the workflow consumers copy.
 - `scripts/__tests__/*.test.mjs`: tests.
 - `.claude-plugin/plugin.json`: plugin manifest, though this repo is no longer a plugin
