@@ -107,8 +107,9 @@ resolve, push with `--force-with-lease`, re-run.
 base changed a file this PR changes, and it does so before waiting on CI, so the discarded
 run is usually one still queued. A base that moved only through the repo's shared blast
 radius is checked locally on the merge result instead (`integrationCheck`), costing no CI
-lane and no review round. A hand rebase buys neither saving: it restarts every lane and asks
-for a fresh review.
+lane and no review round. Where the base requires a merge queue, `pr:land` never rebases at
+all: it enqueues the green PR and the queue tests the merge result in CI. A hand rebase buys
+none of these savings: it restarts every lane and asks for a fresh review.
 
 On exit `10`, read the failure before assuming it is your code. An infrastructure failure
 — a broken runner cache, a hung service lane — is not a regression to "fix". Inventing a

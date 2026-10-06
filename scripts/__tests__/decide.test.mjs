@@ -453,3 +453,67 @@ test('SAFETY: protected wins over every other terminal and precondition', () => 
     assert.equal(decide(s).exit, EXIT.PREFLIGHT);
   }
 });
+
+// --- the merge queue ---------------------------------------------------------
+//
+// A base that requires a queue is observed, not configured, and changes what a
+// green PR's last step is: never a direct merge, never a rebase to stay current.
+
+const queued = (q = {}) => ({ id: 'PR_x', enabled: true, inQueue: false, position: null, failures: [], ...q });
+
+test('queue: a green, ungated PR is enqueued instead of merged', () => {
+  const d = decide(withState({ queue: queued() }));
+  assert.equal(d.action, ACTION.ENQUEUE);
+});
+
+test('queue: no queue on the base keeps the direct merge', () => {
+  const d = decide(withState({ queue: { ...queued(), enabled: false } }));
+  assert.equal(d.action, ACTION.MERGE);
+});
+
+test('queue: a PR already in the queue waits there', () => {
+  const d = decide(withState({ queue: queued({ inQueue: true, position: 2 }) }));
+  assert.equal(d.action, ACTION.WAIT_QUEUE);
+  assert.match(d.why, /position 2/);
+});
+
+test('queue: stuck in the queue past the timeout goes to a human', () => {
+  const d = decide(withState({ queue: queued({ inQueue: true }), queueDeadlinePassed: true }));
+  assert.equal(d.exit, EXIT.NEEDS_HUMAN);
+});
+
+test('queue: one removal is retried — a single flaky lane must not hand back a sound PR', () => {
+  const d = decide(withState({ queue: queued({ failures: [{ at: 't1', reason: 'CI failed' }] }) }));
+  assert.equal(d.action, ACTION.ENQUEUE);
+  assert.match(d.why, /CI failed/);
+});
+
+test('queue: a second removal of the same head is CI red, with the reasons', () => {
+  const failures = [{ at: 't1', reason: 'CI failed' }, { at: 't2', reason: 'CI failed again' }];
+  const d = decide(withState({ queue: queued({ failures }) }));
+  assert.equal(d.exit, EXIT.CI_RED);
+  assert.match(d.detail, /CI failed again/);
+});
+
+test('queue: a hard-stopped PR is never enqueued', () => {
+  const d = decide(withState({ queue: queued(), gated: ['x — why'] }));
+  assert.equal(d.exit, EXIT.NEEDS_HUMAN);
+});
+
+test('queue: red CI on the PR head is still red — the queue is not a second chance', () => {
+  const d = decide(withState({ queue: queued(), checks: { state: 'red', failures: [] } }));
+  assert.equal(d.exit, EXIT.CI_RED);
+});
+
+test('queue: a conflicting PR still needs its rebase — the queue cannot build it either', () => {
+  const d = decide(withState({ queue: queued(), pr: { ...base().pr, mergeable: 'CONFLICTING' } }));
+  assert.equal(d.exit, EXIT.PREFLIGHT);
+});
+
+test('queue: base movement never rebases or checks locally when a queue is active', () => {
+  const cfg = { rebaseRadius: ['package.json'], sharedBlastRadius: ['packages/shared/'], integrationCheck: null };
+  const m = baseMovement(['package.json', 'src/a.ts', 'packages/shared/x.ts'], ['src/a.ts'], cfg, { queue: true });
+  assert.equal(m.needsRebase, false);
+  assert.equal(m.needsIntegrationCheck, false);
+  assert.equal(baseMovement(['src/a.ts'], ['src/a.ts'], cfg).needsRebase, true, 'without a queue, overlap still rebases');
+});

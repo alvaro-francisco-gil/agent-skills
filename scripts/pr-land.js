@@ -9,7 +9,8 @@
  * was.
  *
  *   0   merged and the remote branch is gone
- *   10  CI red, or the merge result fails `integrationCheck` (output printed) — fix, re-run
+ *   10  CI red, the merge result fails `integrationCheck`, or the merge queue removed
+ *       this head twice (output printed) — fix, re-run
  *   20  review requested changes (findings printed) — fix the cause, re-run
  *   30  hard-stop, draft, closed, a deadline, or (unless the repo sets
  *       `roundsExhausted: "merge"`) rounds exhausted — hand to a human
@@ -40,6 +41,10 @@
  *   after green + approved. A base that moved only through the shared blast
  *   radius is answered by `integrationCheck` on the merge result, locally — see
  *   `baseMovement`.
+ * - **A merge queue replaces all of the above.** When the base branch requires
+ *   one (observed from GitHub, not configured), the loop never rebases and never
+ *   runs the local check: it hands a green PR to the queue, which tests the real
+ *   merge result in CI and merges it. See the queue section of decide.js.
  * - **A lane that never ran is not a lane that passed.** GitHub reports "skipped
  *   by a path filter" and "skipped because my dependency died" with the same
  *   word, and only the second can merge an unvalidated diff. See `checksVerdict`.
@@ -119,6 +124,7 @@ const DEFAULTS = {
   integrationCheck: null,
   pollIntervalMs: 20_000,
   checksTimeoutMs: 90 * 60 * 1000,
+  queueTimeoutMs: 90 * 60 * 1000,
   reviewTimeoutMs: 20 * 60 * 1000,
 };
 
@@ -323,7 +329,13 @@ const gateLabel = (gate) => gate.workflow || 'CI';
  *
  * `forced` and `blast` list the triggering files, from whichever side.
  */
-function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG) {
+function baseMovement(baseChangedFiles, prFiles, cfg = CONFIG, { queue = false } = {}) {
+  // A merge queue tests the real merge result before merging, so nothing here
+  // needs answering on the branch: a textual conflict still surfaces, as
+  // CONFLICTING mergeability, and is the only thing that still needs a rebase.
+  if (queue) {
+    return { overlap: [], forced: [], blast: [], scope: 'shared', needsRebase: false, needsIntegrationCheck: false };
+  }
   const overlap = baseChangedFiles.filter((f) => prFiles.includes(f));
   const baseMovedCode = baseChangedFiles.length > 0;
   const prMovedCode = prFiles.length > 0;
@@ -475,6 +487,56 @@ function observeMergeable(number) {
   const raw = gh(['pr', 'view', String(number), '--json', 'mergeable'], { allowFail: true });
   if (failed(raw)) return 'UNKNOWN';
   return JSON.parse(raw || '{}').mergeable || 'UNKNOWN';
+}
+
+/**
+ * The merge queue as this PR sees it, from one GraphQL read. Pure.
+ *
+ * `enabled` is observed, never configured: if the base requires a queue, the
+ * queue is the only way in, and a loop that tried a direct merge there would
+ * spin. `failures` are the removals of THIS head — anything older than its
+ * commit belongs to a head that no longer exists.
+ */
+function queueStateFrom(node) {
+  if (!node) return null;
+  const head = node.commits?.nodes?.[0]?.commit;
+  const headAt = head?.committedDate ? Date.parse(head.committedDate) : 0;
+  const failures = (node.timelineItems?.nodes || [])
+    .filter((e) => e && e.createdAt && Date.parse(e.createdAt) > headAt)
+    .map((e) => ({ at: e.createdAt, reason: e.reason || '' }));
+  return {
+    id: node.id,
+    enabled: Boolean(node.isMergeQueueEnabled),
+    inQueue: Boolean(node.isInMergeQueue),
+    position: node.mergeQueueEntry?.position ?? null,
+    failures,
+  };
+}
+
+const QUEUE_QUERY = `query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id isMergeQueueEnabled isInMergeQueue
+      mergeQueueEntry { position }
+      commits(last: 1) { nodes { commit { committedDate } } }
+      timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT], last: 20) {
+        nodes { ... on RemovedFromMergeQueueEvent { createdAt reason } }
+      }
+    }
+  }
+}`;
+
+function observeQueue(number) {
+  const raw = gh(
+    ['api', 'graphql', '-f', `query=${QUEUE_QUERY}`, '-F', 'owner={owner}', '-F', 'repo={repo}', '-F', `number=${number}`],
+    { allowFail: true },
+  );
+  if (failed(raw)) return null; // unknown, NOT "no queue"
+  try {
+    return queueStateFrom(JSON.parse(raw).data.repository.pullRequest);
+  } catch {
+    return null;
+  }
 }
 
 // A `gh pr checks` state of SKIPPED is two utterly different facts wearing one
@@ -634,7 +696,10 @@ function observe(deadlines) {
 
   const gitDir = sh('git rev-parse --git-dir', { allowFail: true }) || '';
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
-  const movement = baseMovement(baseChanged, files);
+  const queue = pr.number && pr.state === 'open'
+    ? observeQueue(pr.number)
+    : { enabled: false, inQueue: false, position: null, failures: [] };
+  const movement = baseMovement(baseChanged, files, CONFIG, { queue: Boolean(queue && queue.enabled) });
 
   return {
     baseBranch: CONFIG.baseBranch,
@@ -657,6 +722,7 @@ function observe(deadlines) {
     },
     pr,
     checks: checks || { state: 'unknown', failures: [] },
+    queue,
     review: reviewFor(pr.reviews, headSha),
     remoteBranchExists: Boolean(remoteSha),
     files,
@@ -669,6 +735,7 @@ function observe(deadlines) {
       ? observeIntegration(path.resolve(common || '.git'), headSha, baseTip, movement.scope, files)
       : { state: 'not-needed', output: '', verdictFile: null },
     checksDeadlinePassed: Date.now() > deadlines.checks,
+    queueDeadlinePassed: Boolean(deadlines.queue) && Date.now() > deadlines.queue,
     reviewDeadlinePassed: Date.now() > deadlines.review,
   };
 }
@@ -848,6 +915,7 @@ function act(action, s) {
 
     case ACTION.WAIT_CHECKS:
     case ACTION.WAIT_REVIEW:
+    case ACTION.WAIT_QUEUE:
       return sleep(CONFIG.pollIntervalMs);
 
     case ACTION.REBASE: {
@@ -876,6 +944,18 @@ function act(action, s) {
       // under this contract. The remote ref is deleted as its own reconciled step.
       gh(['pr', 'merge', String(s.pr.number), `--${CONFIG.mergeMethod}`]);
       return log(`  merged #${s.pr.number}`);
+
+    case ACTION.ENQUEUE: {
+      if (DRY_RUN) return log(`  [dry-run] would add #${s.pr.number} to the merge queue`);
+      // expectedHeadOid: a push racing this call must not enqueue a head nobody
+      // has seen green. GitHub refuses the mutation instead.
+      gh([
+        'api', 'graphql',
+        '-f', 'query=mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { position } } }',
+        '-f', `id=${s.queue.id}`, '-f', `head=${s.branch.headSha}`,
+      ]);
+      return log(`  queued #${s.pr.number} — the queue now runs CI on the merge result`);
+    }
 
     case ACTION.DELETE_REMOTE: {
       if (DRY_RUN) return log('  [dry-run] would delete the remote branch');
@@ -967,6 +1047,13 @@ function main() {
 
   for (;;) {
     const s = observe(deadlines);
+    // The queue's clock starts when the PR enters it, not when the head was pushed:
+    // CI and review have already spent theirs.
+    if (s.queue && s.queue.inQueue) {
+      if (!deadlines.queue) deadlines.queue = Date.now() + CONFIG.queueTimeoutMs;
+    } else {
+      deadlines.queue = null;
+    }
     if (s.branch.headSha !== deadlineHead) {
       if (deadlineHead !== null) {
         resetDeadlines();
@@ -978,7 +1065,7 @@ function main() {
     }
 
     // An unreadable world is NOT a verdict about the PR — look again.
-    if (s.pr.state === 'unknown' || s.checks.state === 'unknown') {
+    if (s.pr.state === 'unknown' || s.checks.state === 'unknown' || s.queue === null) {
       if (++unknownStreak > 10) {
         finish({
           exit: EXIT.NEEDS_HUMAN,
@@ -1001,7 +1088,7 @@ function main() {
       process.exit(0);
     }
 
-    const isWait = verdict.action === ACTION.WAIT_CHECKS || verdict.action === ACTION.WAIT_REVIEW;
+    const isWait = [ACTION.WAIT_CHECKS, ACTION.WAIT_REVIEW, ACTION.WAIT_QUEUE].includes(verdict.action);
     if (!isWait) {
       const key = `${verdict.action}|${JSON.stringify(s.pr)}|${s.remoteBranchExists}|${s.branch.headSha}`;
       repeat = key === repeat.key ? { key, n: repeat.n + 1 } : { key, n: 1 };
@@ -1037,5 +1124,5 @@ module.exports = {
   loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
-  checksVerdict, runIdOf,
+  checksVerdict, runIdOf, queueStateFrom,
 };
