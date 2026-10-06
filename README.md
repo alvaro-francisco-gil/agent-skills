@@ -187,6 +187,16 @@ review gate rather than silently auto-merging something it never declared.
   and handed to a human, never reported as a broken merge.
 - With no `integrationCheck`, only the **base** side rebases; the PR's own side of a radius
   is not verified before the merge at all, because a rebase cannot remove that trigger.
+- **A merge queue on the base replaces all of the staleness rules above.** `pr:land` reads
+  `isMergeQueueEnabled` off the PR — there is no config key, because a base that requires a
+  queue accepts nothing else. With one, it never rebases and never runs `integrationCheck`:
+  a green, approved, ungated PR is enqueued (`enqueuePullRequest`, pinned to the head it saw
+  green), and GitHub runs CI on the PR stacked on the base and merges a green result. A
+  removal is retried once (a single flaky lane), a second removal of the same head exits
+  `10` with the queue's reasons, and `queueTimeoutMs` (default 90 min, counted from entering
+  the queue) bounds the wait. A conflict still needs a rebase. The repo's side: a ruleset
+  requiring the queue, and a `merge_group:` trigger on the workflows whose checks it requires
+  — without that trigger the queue waits for checks that never report.
 - A **round** is a `CHANGES_REQUESTED` review, and `maxReviewRounds` caps those alone. An
   approval ends the conversation, so the review a later CI-fix push buys is not a round —
   and neither is an approval the reviewer re-posts onto a clean rebase.

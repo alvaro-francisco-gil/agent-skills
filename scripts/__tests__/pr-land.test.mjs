@@ -678,3 +678,30 @@ test('ciGates: malformed or ambiguous config is rejected at load', () => {
   assert.throws(bad({ ciGates: [{ workflow: 'a.yml', paths: ['x/'], requiredLanes: 'Lint' }] }), /requiredLanes/);
   assert.deepEqual(loadConfig(repoWithConfig({ ciGates: [{ workflow: 'a.yml', paths: ['x/'] }] })).ciGates[0].requiredLanes, []);
 });
+
+// --- the merge queue, as observed --------------------------------------------
+
+test('queue state: only removals after the current head count against it', () => {
+  const { queueStateFrom } = require('../pr-land.js');
+  const q = queueStateFrom({
+    id: 'PR_1',
+    isMergeQueueEnabled: true,
+    isInMergeQueue: false,
+    mergeQueueEntry: null,
+    commits: { nodes: [{ commit: { committedDate: '2026-10-06T10:00:00Z' } }] },
+    timelineItems: {
+      nodes: [
+        { createdAt: '2026-10-06T09:00:00Z', reason: 'an older head' },
+        { createdAt: '2026-10-06T10:30:00Z', reason: 'this head' },
+        {},
+      ],
+    },
+  });
+  assert.equal(q.enabled, true);
+  assert.deepEqual(q.failures.map((f) => f.reason), ['this head']);
+});
+
+test('queue state: an unreadable PR is unknown, never "no queue"', () => {
+  const { queueStateFrom } = require('../pr-land.js');
+  assert.equal(queueStateFrom(null), null);
+});

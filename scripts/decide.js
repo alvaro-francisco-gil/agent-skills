@@ -23,6 +23,14 @@
 
 const EXIT = { MERGED: 0, CI_RED: 10, CHANGES_REQUESTED: 20, NEEDS_HUMAN: 30, PREFLIGHT: 40 };
 
+/**
+ * How many times one head may leave the merge queue unmerged before it is the
+ * author's problem. Two, not one: the queue runs the full suite, emulators
+ * included, and a single flaky lane would otherwise hand a sound PR back. A
+ * second removal on the same head is no longer a coin flip.
+ */
+const MAX_QUEUE_ATTEMPTS = 2;
+
 const ACTION = {
   PUSH: 'push',
   OPEN_PR: 'open-pr',
@@ -31,6 +39,8 @@ const ACTION = {
   REBASE: 'rebase',
   INTEGRATION_CHECK: 'integration-check',
   MERGE: 'merge',
+  ENQUEUE: 'enqueue',
+  WAIT_QUEUE: 'wait-queue',
   DELETE_REMOTE: 'delete-remote-branch',
 };
 
@@ -296,6 +306,46 @@ function decide(s) {
     }
   }
 
+  // --- the merge queue ------------------------------------------------------
+  // When the base requires a merge queue, GitHub owns integration: it tests this
+  // PR stacked on the base (and on every PR ahead of it) in CI and merges only a
+  // green result. That is why baseMovement() never asks for a rebase or a local
+  // check here — the queue answers both on the real merge result, and a rebase
+  // would only restart a CI run the queue is about to repeat anyway.
+  if (s.queue && s.queue.enabled) {
+    if (s.queue.inQueue) {
+      if (s.queueDeadlinePassed) {
+        return {
+          exit: EXIT.NEEDS_HUMAN,
+          why: `#${s.pr.number} has been in the merge queue past the timeout`,
+          detail: `  The queue's own CI run is stuck or starved. Look at the queue, not the PR.\n\n  PR: ${s.pr.url}`,
+        };
+      }
+      return { action: ACTION.WAIT_QUEUE, why: `in the merge queue${s.queue.position ? ` (position ${s.queue.position})` : ''}` };
+    }
+    if (s.queue.failures.length >= MAX_QUEUE_ATTEMPTS) {
+      return {
+        exit: EXIT.CI_RED,
+        why: `the merge queue removed this head ${s.queue.failures.length} times — it does not integrate with ${s.baseBranch}`,
+        detail: [
+          ...s.queue.failures.map((f) => `  · ${f.at} — ${f.reason || 'no reason given'}`),
+          '',
+          `  The queue tested this PR on top of ${s.baseBranch} and it failed there, so the`,
+          '  base moved into it. Rebase, run the failing suite, fix, and push:',
+          `    git fetch origin ${s.baseBranch} && git rebase origin/${s.baseBranch}`,
+          '',
+          `  PR: ${s.pr.url}`,
+        ].join('\n'),
+      };
+    }
+    return {
+      action: ACTION.ENQUEUE,
+      why: s.queue.failures.length
+        ? `the queue removed it once (${s.queue.failures[0].reason || 'no reason given'}) — one retry, in case that was a flake`
+        : `${bar(s, reviewSpent)}, and ungated — handing it to the merge queue`,
+    };
+  }
+
   return { action: ACTION.MERGE, why: `${bar(s, reviewSpent)}, current, and ungated` };
 }
 
@@ -312,4 +362,4 @@ function bar(s, reviewSpent = false) {
   return s.requireApprovingReview ? 'green and approved' : 'green (no review required here)';
 }
 
-module.exports = { decide, EXIT, ACTION };
+module.exports = { decide, EXIT, ACTION, MAX_QUEUE_ATTEMPTS };
