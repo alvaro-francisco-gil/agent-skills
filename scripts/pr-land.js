@@ -444,6 +444,45 @@ function judgeIntegrationVerdict(v, { baseTip, scope, movedSince, prFiles, now =
 // unreadable field stays `unknown` and the loop looks again.
 // ---------------------------------------------------------------------------
 
+/**
+ * Which of the PRs ever opened from this branch NAME is this branch's PR.
+ *
+ * A name is not an identity: a new branch can reuse the name of one merged
+ * months ago, and that old PR answers `--head <name>` too. Taken at its word it
+ * reads as "already merged", and the loop exits 0 without pushing anything. So
+ * a merged PR only counts while HEAD carries no commit it did not merge; new
+ * work under the name means a new PR. An open PR always wins: it is the live one.
+ *
+ * @param {Array<{number?: number, state?: string, baseRefName?: string, headRefOid?: string}>} prs `gh pr list` rows, newest first
+ * @param {{baseBranch: string, carriesWorkBeyond: (pr: object) => boolean}} opts
+ */
+function pickBranchPr(prs, { baseBranch, carriesWorkBeyond }) {
+  // Filter by BASE too. `--head develop` also matches release PRs (develop →
+  // beta), and treating one of those as "this branch's PR" is how the loop
+  // concluded that develop was merged and should be deleted.
+  const list = prs.filter((p) => p.baseRefName === baseBranch);
+  const open = list.find((p) => String(p.state).toLowerCase() === 'open');
+  if (open) return open;
+  const latest = list[0];
+  if (!latest) return null;
+  if (String(latest.state).toLowerCase() === 'merged' && carriesWorkBeyond(latest)) return null;
+  return latest;
+}
+
+/**
+ * Does HEAD hold commits that neither the PR's head nor the base has? When that
+ * cannot be known it answers false, which keeps the previous reading of a
+ * merged PR.
+ */
+function headCarriesWorkBeyond(pr) {
+  const present = () => sh(`git cat-file -e ${pr.headRefOid}^{commit}`, { allowFail: true }) !== null;
+  // A squash-merged head is reachable from no branch; GitHub keeps it under the PR ref.
+  if (!present()) sh(`git fetch --quiet origin pull/${pr.number}/head`, { allowFail: true });
+  if (!present()) return false;
+  const count = sh(`git rev-list --count HEAD ^${pr.headRefOid} ^origin/${CONFIG.baseBranch}`, { allowFail: true });
+  return count !== null && Number(count) > 0;
+}
+
 function observePr(branch) {
   const raw = gh(
     ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '20',
@@ -451,12 +490,11 @@ function observePr(branch) {
     { allowFail: true },
   );
   if (failed(raw)) return null; // unknown, NOT absent
-  // Filter by BASE too. `--head develop` also matches release PRs (develop →
-  // beta), and treating one of those as "this branch's PR" is how the loop
-  // concluded that develop was merged and should be deleted.
-  const list = JSON.parse(raw || '[]').filter((p) => p.baseRefName === CONFIG.baseBranch);
-  if (!list.length) return { state: 'none', reviews: [] };
-  const p = list[0];
+  const p = pickBranchPr(JSON.parse(raw || '[]'), {
+    baseBranch: CONFIG.baseBranch,
+    carriesWorkBeyond: headCarriesWorkBeyond,
+  });
+  if (!p) return { state: 'none', reviews: [] };
   const state = String(p.state || '').toLowerCase(); // open | merged | closed
   return {
     number: p.number,
@@ -1124,5 +1162,5 @@ module.exports = {
   loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
-  checksVerdict, runIdOf, queueStateFrom,
+  checksVerdict, runIdOf, queueStateFrom, pickBranchPr,
 };

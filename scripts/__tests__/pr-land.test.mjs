@@ -705,3 +705,35 @@ test('queue state: an unreadable PR is unknown, never "no queue"', () => {
   const { queueStateFrom } = require('../pr-land.js');
   assert.equal(queueStateFrom(null), null);
 });
+
+// A branch NAME is not an identity: an old merged PR from a reused name answers
+// `gh pr list --head <name>` too, and read as this branch's PR it reported
+// "already merged" and exited 0 without pushing the new work.
+const { pickBranchPr } = require('../pr-land.js');
+
+test('pickBranchPr: a merged PR the branch has moved past is not this branch\'s PR', () => {
+  const old = { number: 895, state: 'MERGED', baseRefName: 'develop', headRefOid: 'old' };
+  assert.equal(pickBranchPr([old], { baseBranch: 'develop', carriesWorkBeyond: () => true }), null);
+});
+
+test('pickBranchPr: a merged PR that holds all of HEAD is still the landed one', () => {
+  const landed = { number: 1441, state: 'MERGED', baseRefName: 'develop', headRefOid: 'head' };
+  assert.equal(pickBranchPr([landed], { baseBranch: 'develop', carriesWorkBeyond: () => false }), landed);
+});
+
+test('pickBranchPr: an open PR wins over a newer-looking concluded one', () => {
+  const merged = { number: 900, state: 'MERGED', baseRefName: 'develop', headRefOid: 'a' };
+  const open = { number: 901, state: 'OPEN', baseRefName: 'develop', headRefOid: 'b' };
+  const never = () => { throw new Error('an open PR needs no ancestry check'); };
+  assert.equal(pickBranchPr([merged, open], { baseBranch: 'develop', carriesWorkBeyond: never }), open);
+});
+
+test('pickBranchPr: a closed PR is left for decide() to hand to a human', () => {
+  const closed = { number: 902, state: 'CLOSED', baseRefName: 'develop', headRefOid: 'c' };
+  assert.equal(pickBranchPr([closed], { baseBranch: 'develop', carriesWorkBeyond: () => true }), closed);
+});
+
+test('pickBranchPr: PRs into another base are ignored', () => {
+  const release = { number: 903, state: 'MERGED', baseRefName: 'beta', headRefOid: 'd' };
+  assert.equal(pickBranchPr([release], { baseBranch: 'develop', carriesWorkBeyond: () => false }), null);
+});
