@@ -1162,5 +1162,5 @@ module.exports = {
   loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
-  checksVerdict, runIdOf, queueStateFrom, pickBranchPr,
+  checksVerdict, runIdOf, queueStateFrom, pickBranchPr, headCarriesWorkBeyond,
 };

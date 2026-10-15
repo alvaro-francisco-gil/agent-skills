@@ -737,3 +737,58 @@ test('pickBranchPr: PRs into another base are ignored', () => {
   const release = { number: 903, state: 'MERGED', baseRefName: 'beta', headRefOid: 'd' };
   assert.equal(pickBranchPr([release], { baseBranch: 'develop', carriesWorkBeyond: () => false }), null);
 });
+
+// The ancestry half, against real repos. The old PR's head is pushed only as
+// `refs/pull/7/head` — what a squash merge leaves behind — so the clone has to
+// fetch it before it can tell whether HEAD moved past it.
+const { headCarriesWorkBeyond } = require('../pr-land.js');
+
+function repoWithOldPrHead() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'land-reuse-'));
+  const run = (cwd, cmd) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd, stdio: 'pipe' }).toString().trim();
+  const origin = path.join(tmp, 'origin.git');
+  const seed = path.join(tmp, 'seed');
+  const clone = path.join(tmp, 'clone');
+  run(tmp, `init -q --bare -b develop ${origin}`);
+  run(tmp, `clone -q ${origin} ${seed}`);
+  run(seed, 'checkout -qb develop');
+  fs.writeFileSync(path.join(seed, 'a.txt'), 'base\n');
+  run(seed, 'add . && git -c user.name=t -c user.email=t@t commit -qm base');
+  run(seed, 'push -q origin develop');
+  run(seed, 'checkout -qb old');
+  fs.writeFileSync(path.join(seed, 'old.txt'), 'old\n');
+  run(seed, 'add . && git -c user.name=t -c user.email=t@t commit -qm old');
+  const oldHead = run(seed, 'rev-parse HEAD');
+  run(seed, 'push -q origin HEAD:refs/pull/7/head');
+  // file:// rather than a path: a local clone hardlinks every object, the PR ref's included.
+  run(tmp, `clone -q -b develop file://${origin} ${clone}`);
+  return { clone, oldHead, run };
+}
+
+function inRepo(dir, fn) {
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try { return fn(); } finally { process.chdir(cwd); }
+}
+
+test('headCarriesWorkBeyond: new work on a reused name, with the old head fetched from the PR ref', () => {
+  const { clone, oldHead, run } = repoWithOldPrHead();
+  run(clone, 'checkout -qb reused');
+  fs.writeFileSync(path.join(clone, 'new.txt'), 'new\n');
+  run(clone, 'add . && git -c user.name=t -c user.email=t@t commit -qm new');
+  assert.throws(() => run(clone, `cat-file -e ${oldHead}^{commit}`), 'the old head starts out missing locally');
+  assert.equal(inRepo(clone, () => headCarriesWorkBeyond({ number: 7, headRefOid: oldHead })), true);
+});
+
+test('headCarriesWorkBeyond: HEAD at the merged head carries nothing beyond it', () => {
+  const { clone, oldHead, run } = repoWithOldPrHead();
+  run(clone, 'fetch -q origin pull/7/head');
+  run(clone, `checkout -qb landed ${oldHead}`);
+  assert.equal(inRepo(clone, () => headCarriesWorkBeyond({ number: 7, headRefOid: oldHead })), false);
+});
+
+test('headCarriesWorkBeyond: an unreachable head keeps the old reading', () => {
+  const { clone } = repoWithOldPrHead();
+  const ghost = '0123456789abcdef0123456789abcdef01234567';
+  assert.equal(inRepo(clone, () => headCarriesWorkBeyond({ number: 99, headRefOid: ghost })), false);
+});
