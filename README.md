@@ -31,10 +31,12 @@ multiple projects as a git submodule so a single copy is the source of truth.
 - **review-ideas** — checks `docs/plans/ideas/` against the code with read-only scouts,
   oldest-reviewed first, fixes or retires what is false, and asks the user for the yeses
   that move ideas to `ready/`. Docs only; no PRs except one for ideas pinned by code.
-- **enhance-repo** — an autonomous enhancement pass over one repo: measures it and its git
-  history, finds what is worth building (architecture, reliability, product, record), and
-  files up to N evidence-backed `ideas/` plans, pre-approved only where `## Approval` frees
-  them. Plans only; feeds `review-ideas` and `advance-plans`.
+- **enhance-repo** — an autonomous enhancement pass over one repo: `enhance-measure.js`
+  measures it, one agent triages the evidence into coherent units, the units are
+  investigated (in parallel on a large repo), and the best N become `ideas/` plans,
+  pre-approved only where `## Approval` frees them. A repo tunes it with an optional
+  `## Enhance` section in its `AGENTS.md`. Plans only; feeds `review-ideas` and
+  `advance-plans`.
 
 **Scripts**
 
@@ -56,6 +58,9 @@ multiple projects as a git submodule so a single copy is the source of truth.
   stops only this worktree's lander (`--kill`), never another's.
 - **scripts/ideas-review-order.js** — ideas by last review, oldest first, from git history
   and `Reviewed-Idea:` trailers. `review-ideas`' queue.
+- **scripts/enhance-measure.js** — `enhance-repo`'s evidence as JSON: churn × size × fix
+  density with rename-folded history, co-change, the backlog by title, `## Approval` /
+  `## Enhance`, hard stops, open PRs and the size signals that decide fan-out. Read-only.
 - **scripts/agent-auto-mode.js** — installs the repo's `.agents/auto-mode.json` policy into
   the user's Claude Code settings (see *Auto-mode policy*).
 
@@ -209,6 +214,17 @@ review gate rather than silently auto-merging something it never declared.
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.
 - With no reviewer bot, also set `"reviewLabel": null`, so the loop does not create a label
   nothing listens to.
+
+### Adding the enhancement pass
+
+`enhance-repo` needs nothing else wired:
+
+```sh
+ln -s ../_shared/skills/enhance-repo .agents/skills/enhance-repo
+ln -s ../.agents/_shared/scripts/enhance-measure.js scripts/enhance-measure.js
+```
+
+Optionally add a `## Enhance` section to `AGENTS.md` (format in the skill).
 
 ### Adding the orchestration layer
 

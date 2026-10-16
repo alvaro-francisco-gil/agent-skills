@@ -5,7 +5,7 @@ machine behind it (`scripts/pr-land.js`, with its decision table in `scripts/dec
 and the parallel-batch layer on top: `skills/orchestrate`, `skills/advance-plans`,
 `skills/review-ideas`, `skills/enhance-repo`, `scripts/plans-map.js`, `scripts/agent-env.sh` and the fleet scripts
 (`agent-capacity.js`, `agent-dispatch.sh`, `pr-land-bg.sh`, `ideas-review-order.js`,
-`agent-auto-mode.js`), plus `hooks/guard-lander-kill.sh`. `README.md` explains the wiring and every
+`enhance-measure.js`, `agent-auto-mode.js`), plus `hooks/guard-lander-kill.sh`. `README.md` explains the wiring and every
 field of `.agents/land.config.json` and `.agents/orchestrate.config.json`.
 
 ## Edits propagate to consumers
@@ -45,6 +45,7 @@ submodule bump, so treat each one as a change to all of them.
 - `scripts/agent-capacity.js`, `scripts/agent-dispatch.sh`, `scripts/pr-land-bg.sh`: admit,
   launch and land a worker.
 - `scripts/ideas-review-order.js`: `review-ideas`' queue.
+- `scripts/enhance-measure.js`: `enhance-repo`'s evidence — churn, fixes, co-change, backlog, size.
 - `scripts/agent-auto-mode.js`: installs a repo's `.agents/auto-mode.json` classifier policy.
 - `hooks/guard-lander-kill.sh`: `PreToolUse` guard against pattern-wide lander kills.
 - `templates/plans-map.yml`: the workflow consumers copy.
