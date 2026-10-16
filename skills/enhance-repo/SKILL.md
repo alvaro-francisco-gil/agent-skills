@@ -1,209 +1,211 @@
 ---
 name: enhance-repo
-description: Autonomous enhancement pass over one repo that files plans, never code. Measures the repo and its git history, finds the enhancements worth having (architecture, reliability, product, record), dedups against the backlog, decides each design without asking, and files up to N `docs/plans/ideas/` plans under the repo's own rules — pre-approved only where its `## Approval` frees them. Ends with one report. Use when the user says "enhance this repo", "find improvements", "architecture pass", "find refactor opportunities", "what should this repo do next", or when the approved pool is running dry.
+description: Autonomous enhancement pass over one repo that files plans, never code. Measures the repo with `enhance-measure.js`, triages the evidence into coherent units, investigates each unit (in parallel on a large repo), then selects, classifies and files up to N `docs/plans/ideas/` plans under the repo's own rules — pre-approved only where its `## Approval` frees them. Ends with one report. Use when the user says "enhance this repo", "find improvements", "architecture pass", "find refactor opportunities", "what should this repo do next", or when the approved pool is running dry.
 ---
 
 # Enhance one repo
 
 A pass that turns evidence into plans. It **writes plans, never code**, and runs start to
 finish without asking; the user's only touchpoint is the final report and a yes on the
-plans that need one. Its output plugs into the plan lifecycle where the other skills expect
-it: everything lands in `docs/plans/ideas/`; `review-ideas` and the user move ideas to
-`ready/`; `advance-plans` builds `ready/` and the pre-approved ideas.
+plans that need one. Everything lands in `docs/plans/ideas/`; `review-ideas` and the user
+move ideas to `ready/`; `advance-plans` builds `ready/` and the pre-approved ideas.
+
+```
+measure (script) ──► triage (1 agent) ──► investigate (1 agent per unit, or inline) ──► select & land (1 agent)
+ evidence.json         units.json            drafts/<unit>.md + .json                    plans, commit, report
+```
+
+The stages talk only through files in a **work directory** (`<work>`), so they run the
+same in one session or as separate agents started by a workflow (the workspace
+`/enhance` does that). Each agent then needs only its stage's section below.
 
 ## Repo facts this skill reads — never guess them
 
 | Fact | Where |
 |---|---|
-| branch rules for a docs-only commit, hard stops, commit conventions, plan language | the repo's `AGENTS.md` |
+| branch rules for a docs-only commit, commit format, PR labels and review loops | the repo's `AGENTS.md`, `.agents/land.config.json` |
 | what agents may start without asking | `AGENTS.md` `## Approval` (absent → nothing is pre-approved) |
-| source dirs, languages, test harness, domain invariants | `AGENTS.md`, README, any sub-directory `AGENTS.md` and domain skills it names |
-| base branch | `.agents/land.config.json` `baseBranch`, else `AGENTS.md`, else `origin/HEAD` |
-| commit subject format (conventional or `<scope>: …`), PR labels, review loops a PR must pass | `AGENTS.md`, `.agents/land.config.json` |
+| hard stops | `.agents/land.config.json` `hardStop`, or the list in `AGENTS.md` |
+| **what to look for and what never to propose** | `AGENTS.md` `## Enhance` (optional, below) |
+| source dirs, test harness, domain invariants | `## Enhance`, else `AGENTS.md`, code maps and the domain skills it names |
+| base branch | `.agents/land.config.json` `baseBranch`, else `origin/HEAD`, else `origin/main` |
 | where worktrees live | the caller's scratch path if it gives one — this beats an in-repo location in `AGENTS.md` — else `AGENTS.md`, else a scratch dir outside the repo |
-| plan validator | `scripts/plans-map.js --validate` if present; in a record repo, also its own health check (e.g. `record-check.py`) |
-| plans that live outside the repo but cover it | the workspace's cross-repo plans and any upstream convention repo `AGENTS.md` names |
-| trailers the repo's plan skills query (`Reviewed-Idea:`, `Pre-Approved:`) | used only if `review-ideas`/`advance-plans` are wired, or `AGENTS.md` names them |
+| plan validator | `scripts/plans-map.js --validate` if present; in a record repo, also its own health check |
+| plans outside the repo that cover it | the workspace's cross-repo plans, any upstream convention repo `AGENTS.md` names |
+| trailers the plan skills query (`Reviewed-Idea:`, `Pre-Approved:`) | only if `review-ideas`/`advance-plans` are wired, or `AGENTS.md` names them |
+
+### The `## Enhance` section
+
+A repo tunes the pass with a short section in its `AGENTS.md` — data, not procedure.
+Every line is optional; a repo without the section gets the defaults.
+
+```markdown
+## Enhance
+
+- **Source / tests:** <dirs> · <test harness and how to run it>
+- **Invariants a design must keep:** <the domain skills or docs that hold them>
+- **Lenses:** + <extra lens> · − <lens this repo does not want>
+- **Never propose:** <shapes or areas that are off the table, and why>
+- **Gates:** <paths whose change needs a gate, and which one>
+```
 
 ## Arguments
 
 | Argument | Meaning | Default |
 |---|---|---|
-| a path, domain or named area | **scoped**: run only there; the user already said it hurts, so low churn is no reason to drop it | whole repo |
+| a path, domain or named area | **scoped**: measure and triage only there; the user already said it hurts, so low churn is no reason to drop a unit | whole repo |
 | `--n <k>` | at most `k` plans | 3 (scoped: 2) |
-| `--lens <name>[,…]` | only these lenses (§1) | every lens the repo's kind allows |
-| `--dry-run [<out>]` | write the plans straight to `<out>/<repo>/` (default: a scratch dir, named in the report), no worktree, commit nothing, still return the report | off |
+| `--lens <name>[,…]` | only these lenses | every lens the repo's kind allows, adjusted by `## Enhance` |
+| `--dry-run [<out>]` | plans go to `<out>/<repo>/` (default `<work>/out/`), no worktree, nothing committed; the report still comes back | off |
+| `--work <dir>` | the work directory | a new scratch dir |
+| `--stage <triage\|investigate\|select> [--unit <id>]` | run one stage only (set by a workflow) | all stages, in order |
 
 `N` is a ceiling, never a quota. Zero plans with a good reason is a correct result; filler
 is not.
 
-## 0. Set up
+## Rules for every stage
 
-- Read `AGENTS.md` before anything else; it wins over this file wherever they differ. Of
-  what it points to, read now only what shapes planning — code maps, architecture docs,
-  domain invariants. Build-time procedure (delivery, release, guardrail skills) is read
-  only when a candidate touches its domain.
-- `git fetch origin` and measure `origin/<base>`, not the local branch: the worktree and
-  the builder both start from origin.
-- Decide the repo's **kind**: **code** (source, usually tests/CI), **record** (a
-  system-of-record: sources and renderings, a declared perimeter, no app code), or
-  **mixed** (both). The kind picks the lenses. A record repo with support scripts and
-  tests is **record**, plus the reliability lens over those scripts. An app with content
-directories (manuscripts, a design kit) that declare no perimeter is **code**.
-- No `## Approval` section → every plan will be **needs a yes**; skip the pre-approval
-  analysis in §5 and spend the effort on evidence instead.
-- Read-only git in the main checkout (`fetch`, `status`, `log`, `show`, `diff`). All writes happen
-  in a detached worktree of `origin/<base>` (location: the facts table), removed once
-  pushed. A dry run needs no worktree. Never write in a main checkout another session may be using.
-- **Budget.** Aim to finish in well under an hour of agent time. Never block on a slow
-  scout: write the plans the evidence already justifies, and list what was not finished as
-  `PENDING` in the report. A partial pass that files two good plans beats a complete one
-  that files none.
-- **Subagent restrictions** (for every scout or designer you dispatch, even in a throwaway
-  worktree): read-only git only; no `reset`, `commit --amend`, `checkout --`/`restore`/
-  `clean`, `rebase`, `add -A`/`add .`, no hook-bypass flags, no `worktree remove`; report
-  BLOCKED instead of attempting a destructive op.
+- `AGENTS.md` wins over this file wherever they differ. Read it first, then only what
+  shapes planning: code maps, architecture docs, invariants. Build-time procedure is read
+  only when a unit touches its domain.
+- **Read-only** outside `<work>`: `fetch`, `status`, `log`, `show`, `diff`, and reads.
+  Only select & land writes to the repo, and only in a worktree (or `<out>` in a dry run).
+  No `reset`, `commit --amend`, `checkout --`/`restore`/`clean`, `rebase`, `add -A`/`add .`,
+  hook-bypass flags or `worktree remove` of anything you did not create; report BLOCKED
+  instead.
+- **Budget.** Never block on a slow helper. Write what the evidence already justifies, and
+  report the rest as `PENDING`. A pass that files two good plans beats one that files none.
+- Starting helpers yourself: in **one message**, **in the foreground**
+  (`run_in_background: false`). A backgrounded helper reports to the top of the session,
+  not to you, and its findings are lost to this pass.
 
-## 1. Measure — evidence, not taste
+## 1. Measure — a script, not an agent
 
-Always: README, `AGENTS.md`, and the last ~90 days of `git log` (widen to a year if the
-repo was quiet). For the backlog — `docs/plans/`, `docs/decisions/`, `docs/incidents/`
-— read titles and metadata blocks first (`head -8` each), and read a file in full only
-when a candidate touches it; a repo with 50+ docs makes "read everything" the whole budget.
-Incidents are prime reliability evidence: "what still bites" lives there.
-
-**Fix commits.** Match the repo's commit style, not conventional commits alone: grep the
-subject for `fix|revert|hotfix|crash|broke|regress` (`git log -i -E --grep=…`). On config
-files the count is noisy (tuning commits say "fix" too): read the subjects before trusting
-it.
-
-Then per lens:
-
-**architecture** (code). Rank files by churn × size, boosted by fix density and by
-co-change partners in a *different* module (a seam that leaks). "Code" includes config
-that behaves like code — playbooks, compose files, Dockerfiles, CI workflows, SQL —
-so in an infra repo rank YAML too (default: `yml|yaml|py|sh|j2|Dockerfile|Makefile`);
-exclude lockfiles, generated files and prose docs. For a very large file, or a repo laid
-out by module (`services/<svc>`), compute co-change per module rather than per file.
-Shared resource files every feature touches (locale strings, lockfiles, barrel exports)
-are not co-change evidence. Renames split a file's history: fold the old path's counts
-into the new one and drop paths that no longer exist on `origin/<base>`.
+From the repo root, after `git fetch origin`:
 
 ```bash
-git log --since=90.days --format= --name-only -- <src dirs> | grep -E '\.(<exts>)$' \
-  | grep -v -E '<test patterns>' | sort | uniq -c | sort -rn | head -40          # churn
-git log --since=90.days --format= --name-only -i -E --grep='<fix pattern>' -- <src dirs> \
-  | grep -E '\.(<exts>)$' | sort | uniq -c | sort -rn | head -25                   # fix density
-git log --since=90.days --format='%H' -- <file> | xargs -I{} git show --format= --name-only {} \
-  | grep -v -x '<file>' | sort | uniq -c | sort -rn | head -15                      # co-change
+node <agent-skills>/scripts/enhance-measure.js [--scope <path>] [--since 365] > <work>/evidence.json
 ```
 
-For each top file: is it tested at its public interface, or only through mocks? Keep the
-top ~8 **clusters** (a hot file plus its co-change partners — a concept, not a file).
-Look for shallow modules (interface nearly as complex as the implementation), concepts
-spread over many tiny files, the same rule/threshold/status string in several places, and
-pure helpers extracted for testability while the bugs live in how they are called.
+(`scripts/enhance-measure.js` in a repo that consumes agent-skills; otherwise the path to
+an agent-skills checkout.) It gives, for `origin/<base>`: the hottest source files by
+churn × size × fix density with rename-folded history, their fix commits, co-change
+partners (flagged when in another module), whether a test is named after them; churn per
+module; commit style; size signals and `fanoutEligible`; the repo's `## Approval`,
+`## Enhance` and hard stops; every plan, decision and incident by title; open PRs with
+their files. Widen `--since` when the window holds few commits.
 
-**reliability** (code). What breaks, and how anyone would find out: hot paths without
-tests, flaky or skipped tests (`gh run list -L 50`: failure rate per workflow, reruns
-of the same SHA), CI that doesn't run what matters, unhandled failure modes
-at I/O boundaries, secrets or config hazards, deploy or release steps done by hand,
-dependencies far behind. Evidence: fix commits, CI history (`gh run list` when there is a
-remote), the files themselves.
+## 2. Triage — cut the repo into units
 
-**product** (code or record). What would make the repo markedly better at what it is
-*for* — for an infra repo, what its operator can do. Read its stated purpose, its plans
-and decisions, open issues (`gh issue list --state open`), and what the recent commits
-keep circling; propose the capabilities that follow and that nobody has planned.
-Be bold here — "interesting" beats "safe" — but every idea is anchored in something the
-repo already does, wants or struggles with, and cited.
+One agent, reading `evidence.json` — not the whole repo. It adds only the cheap evidence
+the script cannot produce, per lens:
 
-**record** (record). Run the repo's own health check first (`record-check.py --list`
-or whatever `AGENTS.md` names) — it is the cheapest evidence. Then: **dated obligations
-the record knows about that no plan tracks** (filings, renewals, deadlines — the most
-valuable finding a record pass can make); the same fact restated in several files and
-disagreeing; churn by directory rather than by file; gaps against the declared perimeter, facts without evidence, stale or
-missing renderings, capture that is still manual and could be automated, sources that
-should be linked, structure that makes the record hard for an agent to query.
+- **architecture** (code): the hot files and cross-module co-change are the candidates.
+  Look for shallow modules, one concept spread over many files, the same rule or threshold
+  in several places, logic tested only through mocks.
+- **reliability** (code): `gh run list -L 50` (failure rate per workflow, reruns of one
+  SHA); incident titles ("what still bites" lives there); hot files with no named test;
+  manual deploy steps; secrets and config hazards.
+- **product** (code or record): the repo's stated purpose, its plans and decisions,
+  `gh issue list --state open`, what recent commits keep circling. Be bold — "interesting"
+  beats "safe" — but anchor every idea in something the repo does, wants or struggles with.
+  For an infra repo, product means what its operator can do.
+- **record** (record): run the repo's own health check first. Then **dated obligations the
+  record knows about that no plan tracks** (the most valuable find), the same fact
+  disagreeing across files, gaps against the perimeter, manual capture worth automating.
 
-## 2. Dedup — the backlog is already there
+Then **cut coherently**:
 
-For every candidate, grep `docs/plans/` and `docs/decisions/` for its concepts (and the
-out-of-repo plans in the facts table), and list open PRs (`gh pr list --state open --json number,title,files`) when there is a remote.
+- **A unit is one concept** — a cluster, a gap, a capability — never a file and never a
+  bundle. Name it with the slug its plan would get.
+- **Merge** candidates that are one change seen twice. **Split** a refactor from a
+  behaviour change: they get different approvals. Record the order between related units
+  (`after: <id>`), not as a gate.
+- **Drop at the door** what the backlog titles or open PRs already cover, what
+  `## Enhance` says never to propose, and code a ready/ongoing plan moves out of the repo
+  (`NOTE` it for the destination).
+- **Bounds:** at most `2 × N` units. Fewer is fine; none is fine with a reason.
+- **Fan out** (one investigator per unit) only when `evidence.size.fanoutEligible` is true
+  and there are three or more units; otherwise investigate inline. Write why either way.
 
-- Already planned → drop it. If that plan's facts are wrong, fix them in passing when the
-  repo's rules allow it, in the same commit (in `--dry-run`, write the corrected copy to
-  `<out>/<repo>/_fixed/`).
-- An open PR that is stale or superseded → report it as `NOTE`; never close it.
-- An open PR that *adds a plan* or redesign covering the candidate → treat it as already
-  planned; drop it.
-- The code is scheduled to leave the repo (a ready/ongoing plan moves it elsewhere) →
-  drop it here, and `NOTE` it for the destination repo.
-- A stale fact outside the plans (an `AGENTS.md` list, a README) → report it as `STALE`;
-  this pass files plans and does not edit other docs.
-- A decision record forbids the shape → drop it, or address the decision in the plan.
-- An open PR touches the same files → keep it, gated `blocked:PR #<n> (<why>)`.
+Write `<work>/units.json`:
 
-## 3. Explore and design — in parallel
+```json
+{
+  "kind": "code", "lenses": ["architecture", "reliability", "product"],
+  "fanout": true, "why": "<size reasons>; <k> independent units",
+  "units": [
+    { "id": "<plan slug>", "lens": "architecture",
+      "concept": "<the one concept, in a line>",
+      "evidence": ["<file> churn <n>, <lines> lines", "<sha> <fix subject>"],
+      "paths": ["<files it would touch>"],
+      "check": "<what the investigator must verify first: a decision, an overlapping plan>",
+      "after": null }
+  ],
+  "dropped": [{ "candidate": "<…>", "reason": "<covered by / moving out / never-propose>" }],
+  "urgent": [], "stale": [], "notes": []
+}
+```
 
-With three candidates or fewer, or when you cannot dispatch subagents, work inline and
-keep the A/B/C sketches to a paragraph each — scouts cost more than they save there. When
-the repo already prescribes the shape (an existing pattern the design should follow), say
-so and skip the alternatives. A mechanical refactor whose shapes barely differ gets one
-line on the alternatives, not three designs. Write each scout's findings to a file in your
-scratch directory as they arrive, so a pass that is cut short can resume. Above
-that, if you can dispatch subagents, do each phase in **one message** for all candidates at
-once, **in the foreground** (`run_in_background: false`), so their reports come back to
-you. A backgrounded scout reports to whoever is at the top of the session, not to you:
-end your turn while one runs and its findings are lost to this pass. If you can't
-dispatch subagents, do it inline, candidate by candidate.
+## 3. Investigate — one unit, in depth
 
-- **Explore** (read-only scouts, one per surviving candidate): why it is coupled or
-  fragile or missing, concrete evidence (path + symbol, the fix commits), dependency
-  category (table below), test impact.
-- **Design.** Architecture candidates get three designers, each with one constraint:
-  **A** minimal interface (1–3 entry points); **B** the most common caller trivial;
-  **C** ports & adapters if the cluster crosses a runtime or network boundary, else most
-  extensible. Other lenses get the chosen approach plus its strongest alternative.
+One agent per unit when fanning out, or the triage agent itself, unit by unit. Each gets
+only its unit, `evidence.json`, and the rules above.
 
-**You decide** without asking: pick one design or a clearly better hybrid, one line on why
-each loser lost. No design clearly better than today → drop the candidate and report it.
+1. **Dedup in depth:** grep `docs/plans/` and `docs/decisions/` for the unit's concepts and
+   read what matches; check `openPrs` for its paths. Already planned → drop (if that plan's
+   facts are wrong, write the corrected copy to `<work>/fixed/<plan file name>`). A decision
+   forbids the shape → drop, or address it. An open PR touches the same files → keep it,
+   gated `blocked:PR #<n> (<why>)`.
+2. **Explore:** why it is coupled, fragile or missing — path + symbol, the fix commits —
+   its dependency category (table below), its test impact.
+3. **Design:** architecture units sketch three shapes — **A** minimal interface, **B** the
+   common caller trivial, **C** ports & adapters if it crosses a runtime or network
+   boundary, else most extensible — and pick one or a better hybrid. Other lenses: the
+   chosen approach and its strongest alternative. A mechanical change or a shape the repo
+   already prescribes gets one line on alternatives. No design clearly better than today →
+   drop.
+4. **Draft** the plan to `<work>/drafts/<id>.md` in the format of §5, and write
+   `<work>/drafts/<id>.json`:
 
-## 4. Select
+```json
+{ "id": "…", "verdict": "file | drop", "reason": "…", "lens": "…",
+  "priority": "high | medium | low", "value": 4, "valueWhy": "one line",
+  "class": "pre-approved | needs-yes", "clause": "quoted § Approval clause, if pre-approved",
+  "question": "…", "recommended": "…", "hardStop": false,
+  "urgent": [], "stale": [], "notes": [] }
+```
 
-Drop: cosmetic friction (a long file that rarely changes and never breaks — not in scoped
-mode); anything that contradicts a domain invariant you cannot resolve; anything whose
-honest benefit is "nicer". Rank the rest — architecture/reliability by cost saved or risk
-removed (churn × modules a change must touch × fix density), product/record by how far
-they move the repo's purpose. When two candidates are one change seen twice, split along
-refactor vs behaviour lines and say in each plan's Design which builds first (a sequencing
-note, not a gate). Keep at most `N`; prefer a mix of lenses when scores are
-close.
+`value` (1–5) is what the select stage ranks by: cost saved or risk removed for
+architecture and reliability; how far it moves the repo's purpose for product and record.
 
-## 5. Classify — this decides the gate and the trailer
+## 4. Select and classify — the join
+
+One agent reads `units.json` and every `drafts/*.json`, and opens the drafts it keeps.
+
+- **Drop:** cosmetic friction (not in scoped mode); a domain-invariant conflict you cannot
+  resolve; an honest benefit of "nicer".
+- **Merge** drafts that turned out to be one change; keep the better-evidenced one.
+- **Keep at most `N`**, by `value`, preferring a mix of lenses when values are close.
+- **Classify** each, rereading it in full:
 
 | The plan… | Class |
 |---|---|
 | is freed by a clause in `## Approval` (typically: changes nothing observable; a migration that follows from an architectural benefit; consolidating copies that agree) | **pre-approved** — quote the clause |
 | changes what a user sees or can do, a product rule, a permission, a contract, stored data shape beyond a following migration, running cost; or the repo has no `## Approval`; or you are unsure | **needs a yes** — `**Gate:** decision:<the single question>` |
-| mixes both | split it if the pre-approved half is useful alone; otherwise the whole plan needs a yes |
+| mixes both | split it if the pre-approved half is useful alone; otherwise it needs a yes |
 
-A needs-yes idea always carries its `decision:` gate, even where the repo's own docs
-mention `Gate` only for `ongoing/` — the standard allows it on any plan, and the builders
-bucket on it. A wrong pre-approval gets built without anyone asking; a wrong `decision:` costs one
-message. Product plans almost always need a yes. A plan whose Paths hit the repo's
-hard-stop list (`.agents/land.config.json` `hardStop`, or the list in `AGENTS.md`) says so
-in its Approval section: its PR will never self-merge. A pre-approved plan has no open
-questions. Add `blocked:` gates where §2 or the repo's own rules (e.g. a visual change that
-must run against the user's device) call for one.
+No `## Approval` → everything needs a yes; skip the analysis. A needs-yes idea always
+carries its `decision:` gate. A pre-approved plan has no open questions. Paths that hit a
+hard stop → say so in its Approval section (its PR never self-merges). Add the `blocked:`
+gates `## Enhance` or the repo's rules call for.
 
-## 6. Write the plan
+## 5. The plan format
 
-`docs/plans/ideas/<slug>.md`, bare kebab-case, no date, in the language the repo's plans
-bodies use, and with the block lines formatted the way its existing plans format them. The block
-under the title follows agent-plans v2: `Priority` (required: `high` = hot
-path or repeat fixes, `medium` = known pain, `low` = cleanup), `Gate` only if §2/§5 set
-one; never `Stage`, `Status`, `Updated`, `Next`, `Landed` on an idea.
+`docs/plans/ideas/<slug>.md`, bare kebab-case, in the language the repo's plan bodies use,
+block lines formatted as its existing plans format them. `Priority` required (`high` = hot
+path or repeat fixes, `medium` = known pain, `low` = cleanup); `Gate` only when set; never
+`Stage`, `Status`, `Updated`, `Next` or `Landed` on an idea.
 
 ```markdown
 # <Title>
@@ -214,20 +216,19 @@ one; never `Stage`, `Status`, `Updated`, `Next`, `Landed` on an idea.
 **Goal:** <one sentence: what changes, and what it stops costing or starts enabling>
 
 ## Context
-The evidence, as of `<short sha of origin/base>` (<date>): numbers with their window; short SHA + subject of the commits that
-hit it; path + symbol, never bare line numbers.
+The evidence, as of `<short sha of origin/base>` (<date>): numbers with their window; short
+SHA + subject of the commits that hit it; path + symbol, never bare line numbers.
 
 ## Design
-The chosen shape by responsibility, an illustrative signature or example (say it is
-illustrative), how callers or users migrate.
+The chosen shape by responsibility, an illustrative signature or example (say so), how
+callers or users migrate. Which related plan builds first, if any.
 **Alternatives considered:** one line each, and why they lost.
-**Testing strategy:** (code) the tests at the new boundary, and the shallow tests they make
+**Testing strategy:** (code) tests at the new boundary, and the shallow tests they make
 redundant — replace, don't layer.
 
 ## Paths
-Every file it would touch, as of <date>; mark files that don't exist yet `(new)`, and a
-directory is fine where the files aren't knowable yet. Builders check these against open
-PRs and worktrees.
+Every file it would touch, as of <date>; `(new)` for files that don't exist yet, a
+directory where the files aren't knowable yet.
 
 ## Approval
 Pre-approved — "<quoted clause>". | **Needs your yes** — the `Gate` question; recommended
@@ -237,17 +238,19 @@ answer: <answer>, because <one line>.
 What it deliberately does not do.
 ```
 
-Approve early, plan late: record the decision and the evidence; the File Structure and
-Tasks are written by whoever moves it to `ongoing/`, against that day's code.
+Approve early, plan late: the decision and the evidence; the File Structure and Tasks are
+written by whoever moves it to `ongoing/`, against that day's code.
 
-## 7. Land
+## 6. Land
 
-In `--dry-run`, the plans are already in `<out>/<repo>/`; skip to §8.
+In `--dry-run`, copy the kept plans and `<work>/fixed/` to `<out>/<repo>/` and report.
 
-Otherwise: run the plan validator if there is one (none → say so in the report) (`node scripts/plans-map.js --validate;
-V=$?; [ $V -eq 0 ] || exit $V` — never through a pipe). **One** commit, staged by explicit
-path, never `add -A`, its subject in the repo's own format (conventional `docs(plans): …`,
-or `<scope>: …` where `AGENTS.md` says so):
+Otherwise, in a detached worktree of `origin/<base>`: copy the kept plans into
+`docs/plans/ideas/` and the corrected plans over their originals (after checking each
+original is unchanged since `evidence.json`'s `sha`). Run the plan validator if there is
+one (`node scripts/plans-map.js --validate; V=$?; [ $V -eq 0 ] || exit $V` — never through a
+pipe; none → say so). **One** commit, staged by explicit path, its subject in the repo's
+format:
 
 ```
 <subject in the repo's format>: enhancement pass — <n> ideas (<k> pre-approved, <m> need a yes)
@@ -255,38 +258,33 @@ or `<scope>: …` where `AGENTS.md` says so):
 <one line per plan: slug · lens · class>
 
 Reviewed-Idea: <slug>          (only where the repo uses these trailers)
-Pre-Approved: <slug>           (only for pre-approved plans, after rereading each in full)
+Pre-Approved: <slug>           (only for pre-approved plans)
 Co-Authored-By: <the session's attribution line>
 ```
 
-Trailers go in the final paragraph — git reads them from nowhere else. Push the way
-`AGENTS.md` allows a docs-only change: straight to `<base>` when it allows direct
-commits there (for docs, or for everything in the repo's current phase), otherwise a PR
-that follows the repo's whole PR procedure — every label it asks for, and any review loop
-it requires (e.g. a review bot run until it approves) — which you never merge. Never commit a generated plans map.
-Remove the worktree.
+Trailers go in the final paragraph. Push the way `AGENTS.md` allows a docs-only change:
+straight to `<base>` when it allows direct commits there, otherwise a PR that follows the
+repo's whole PR procedure — every label, every review loop — which you never merge. Never
+commit a generated plans map. Remove the worktree.
 
-## 8. Report
+## 7. Report
 
 ```
-REPO <repo>   KIND <code|record|mixed>   LENSES <…>
-URGENT <what> | <date> | <why it is at risk now>   (first, always: a deadline or live breakage found in passing)
+REPO <repo>   KIND <code|record|mixed>   LENSES <…>   UNITS <n> (<fanout|inline>: <why>)
+URGENT <what> | <date> | <why it is at risk now>   (first, always)
 FILED <slug> | <lens> | <priority> | pre-approved|needs-yes | <one line>
 QUESTION <slug> | <the question> | recommended: <answer>
 DROPPED <candidate> | <reason>
 FIXED <plan> | <stale fact corrected>
 STALE <file[:line]> | <stale fact outside the plans, not edited>
-NOTE <what> | <why the user should know> (a stale PR, a plan whose premise changed, a lead from a prior run that proved wrong)
-PENDING <candidate> | <what was still unchecked when the pass stopped>
+NOTE <what> | <why the user should know>
+PENDING <unit> | <what was unchecked when the pass stopped>
 LANDED <sha on base> | PR <url> | DRY-RUN <dir> | NOTHING
-BLOCKED <step> | <why>        (only if something stopped you)
+BLOCKED <step> | <why>
 ```
 
-An `URGENT` finding is reported, not acted on: the pass files ideas only, and the person
-(or the repo's own rules) decides whether it becomes an `ongoing/` plan today.
-
-Talking to a person instead of a parent agent: the same content as prose — the questions
-first, each answerable with a yes, then buildable-now, dropped, fixed.
+An `URGENT` finding is reported, not acted on. Talking to a person rather than a parent
+agent: the same content as prose — questions first, each answerable with a yes.
 
 ## Dependency categories
 
@@ -303,12 +301,13 @@ Watch for an owned store treated as "external" and over-mocked when a local stan
 
 | Mistake | Instead |
 |---|---|
+| Re-deriving churn with `git log` pipelines | `enhance-measure.js` already did it |
+| Reading the whole repo in triage | Triage reads `evidence.json`; investigators read deeply |
+| One unit per file, or one unit holding three ideas | One concept per unit |
+| Fanning out a small repo | Inline below `fanoutEligible`; onboarding a helper costs more than it saves |
 | Filing N because N was the number | N is a ceiling; zero is fine |
-| Ideas from intuition alone | Start from §1's evidence and cite it |
-| Filing what the backlog already has | §2 first; fix the old plan's stale facts instead |
-| Asking the user to pick a candidate or design | Decide; record the losers in the plan |
-| `Pre-Approved` with no `## Approval` clause, or with an open question | `decision:` gate; unsure means needs a yes |
-| Filing into `ready/` | `ideas/`; `ready/` records a yes |
-| File-by-file tasks or final signatures | The decision and the evidence |
-| Bundling a refactor with a behaviour change | Two plans |
-| Writing code, opening a code PR | Plans only |
+| Filing what the backlog already has | Dedup at triage by title, at investigation in depth |
+| Asking the user to pick a unit or a design | Decide; record the losers in the plan |
+| `Pre-Approved` with no `## Approval` clause, or with an open question | `decision:` gate |
+| Filing into `ready/`, writing code, opening a code PR | `ideas/`, plans only |
+| Bundling a refactor with a behaviour change | Two units, two plans |
