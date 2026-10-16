@@ -17,7 +17,9 @@ measure (script) ──► triage (1 agent) ──► investigate (1 agent per u
 
 The stages talk only through files in a **work directory** (`<work>`), so they run the
 same in one session or as separate agents started by a workflow (the workspace
-`/enhance` does that). Each agent then needs only its stage's section below.
+`/enhance` does that). Each agent then needs only its stage's section below. Every extra
+agent pays an onboarding cost, so a small repo runs all stages in one agent, and only a
+large repo with three or more independent units gets one investigator per unit.
 
 ## Repo facts this skill reads — never guess them
 
