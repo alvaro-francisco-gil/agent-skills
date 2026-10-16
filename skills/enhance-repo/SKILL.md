@@ -1,6 +1,6 @@
 ---
 name: enhance-repo
-description: Autonomous enhancement pass over one repo that files plans, never code. Measures the repo with `enhance-measure.js`, triages the evidence into coherent units, investigates each unit (in parallel on a large repo), then selects, classifies and files up to N `docs/plans/ideas/` plans under the repo's own rules — pre-approved only where its `## Approval` frees them. Ends with one report. Use when the user says "enhance this repo", "find improvements", "architecture pass", "find refactor opportunities", "what should this repo do next", or when the approved pool is running dry.
+description: Autonomous enhancement pass over one repo that files plans, never code. Measures the repo with `enhance-measure.js`, triages the evidence into coherent units, investigates each unit (in parallel on a large repo), then selects, classifies, fact-checks and files up to N `docs/plans/ideas/` plans under the repo's own rules — pre-approved only where its `## Approval` frees them. Ends with one report. Use when the user says "enhance this repo", "find improvements", "architecture pass", "find refactor opportunities", "what should this repo do next", or when the approved pool is running dry.
 ---
 
 # Enhance one repo
@@ -11,8 +11,8 @@ plans that need one. Everything lands in `docs/plans/ideas/`; `review-ideas` and
 move ideas to `ready/`; `advance-plans` builds `ready/` and the pre-approved ideas.
 
 ```
-measure (script) ──► triage (1 agent) ──► investigate (1 agent per unit, or inline) ──► select & land (1 agent)
- evidence.json         units.json            drafts/<unit>.md + .json                    plans, commit, report
+measure ──► triage ──► investigate ──────────► select ──► verify ─────────────► land
+(script)    units.json  drafts/<unit>.md+.json   final/    1 skeptic per plan   commit, report
 ```
 
 The stages talk only through files in a **work directory** (`<work>`), so they run the
@@ -25,7 +25,7 @@ large repo with three or more independent units gets one investigator per unit.
 
 | Fact | Where |
 |---|---|
-| branch rules for a docs-only commit, commit format, PR labels and review loops | the repo's `AGENTS.md`, `.agents/land.config.json` |
+| commit format; whether docs-only commits need a PR (default: no — straight to `<base>`), and if so its labels and review loop | the repo's `AGENTS.md`, `.agents/land.config.json` |
 | what agents may start without asking | `AGENTS.md` `## Approval` (absent → nothing is pre-approved) |
 | hard stops | `.agents/land.config.json` `hardStop`, or the list in `AGENTS.md` |
 | **what to look for and what never to propose** | `AGENTS.md` `## Enhance` (optional, below) |
@@ -202,6 +202,8 @@ carries its `decision:` gate. A pre-approved plan has no open questions. Paths t
 hard stop → say so in its Approval section (its PR never self-merges). Add the `blocked:`
 gates `## Enhance` or the repo's rules call for.
 
+Write each kept plan, in the §5 format, to `<work>/final/<slug>.md`.
+
 ## 5. The plan format
 
 `docs/plans/ideas/<slug>.md`, bare kebab-case, in the language the repo's plan bodies use,
@@ -243,11 +245,33 @@ What it deliberately does not do.
 Approve early, plan late: the decision and the evidence; the File Structure and Tasks are
 written by whoever moves it to `ongoing/`, against that day's code.
 
-## 6. Land
+## 6. Verify — one skeptic per plan
 
-In `--dry-run`, copy the kept plans and `<work>/fixed/` to `<out>/<repo>/` and report.
+Plans read as solid and still carry false claims: on their first landing, a reviewer
+caught a health endpoint known to lie and a wrong statement of how a tool behaves, both
+written with confidence. So before anything lands, **each plan in `<work>/final/` gets an
+agent that did not write it**, whose job is to refute it:
 
-Otherwise, in a detached worktree of `origin/<base>`: copy the kept plans into
+- Check every factual claim against `origin/<base>` at `evidence.json`'s `sha`: paths and
+  symbols exist and say what the plan says; SHAs exist and their subjects match; counts
+  are right; statements about how a tool, framework or service behaves are true (read the
+  code or the docs, never memory); the chosen design does not reproduce a failure the
+  repo has documented (incidents, comments next to the code, decisions).
+- **Fix in place** what is wrong but not load-bearing. A premise that turns out false — the
+  problem does not exist, or a plan, PR or decision already covers it — **drops** the plan.
+- Return `{ slug, verdict: keep | corrected | drop, corrections: [], reason }`.
+
+In one session, start the skeptics in one message, in the foreground; without subagents,
+re-read each plan yourself as its adversary before landing. Never skip this stage to save
+tokens: one wrong plan built on a false premise costs more than every skeptic.
+
+## 7. Land
+
+In `--dry-run`, the verified plans stay in `<work>/final/` (and corrections in
+`<work>/fixed/`); report that directory.
+
+Otherwise, in a detached worktree of `origin/<base>`: copy the verified plans from
+`<work>/final/` into
 `docs/plans/ideas/` and the corrected plans over their originals (after checking each
 original is unchanged since `evidence.json`'s `sha`). Run the plan validator if there is
 one (`node scripts/plans-map.js --validate; V=$?; [ $V -eq 0 ] || exit $V` — never through a
@@ -264,12 +288,13 @@ Pre-Approved: <slug>           (only for pre-approved plans)
 Co-Authored-By: <the session's attribution line>
 ```
 
-Trailers go in the final paragraph. Push the way `AGENTS.md` allows a docs-only change:
-straight to `<base>` when it allows direct commits there, otherwise a PR that follows the
-repo's whole PR procedure — every label, every review loop — which you never merge. Never
+Trailers go in the final paragraph. The commit touches only Markdown, so it goes
+**straight to `<base>`**, with no PR: plans are documents, not code a reviewer must gate.
+Open a PR only when `AGENTS.md` explicitly requires one for docs-only changes, and then
+follow its whole PR procedure — every label, every review loop — and never merge it. Never
 commit a generated plans map. Remove the worktree.
 
-## 7. Report
+## 8. Report
 
 ```
 REPO <repo>   KIND <code|record|mixed>   LENSES <…>   UNITS <n> (<fanout|inline>: <why>)
@@ -304,6 +329,7 @@ Watch for an owned store treated as "external" and over-mocked when a local stan
 | Mistake | Instead |
 |---|---|
 | Re-deriving churn with `git log` pipelines | `enhance-measure.js` already did it |
+| Landing a plan nobody tried to refute | §6: one skeptic per plan, always |
 | Reading the whole repo in triage | Triage reads `evidence.json`; investigators read deeply |
 | One unit per file, or one unit holding three ideas | One concept per unit |
 | Fanning out a small repo | Inline below `fanoutEligible`; onboarding a helper costs more than it saves |
