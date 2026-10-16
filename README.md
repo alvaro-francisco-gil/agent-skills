@@ -31,6 +31,10 @@ multiple projects as a git submodule so a single copy is the source of truth.
 - **review-ideas** — checks `docs/plans/ideas/` against the code with read-only scouts,
   oldest-reviewed first, fixes or retires what is false, and asks the user for the yeses
   that move ideas to `ready/`. Docs only; no PRs except one for ideas pinned by code.
+- **enhance-repo** — an autonomous enhancement pass over one repo: measures it and its git
+  history, finds what is worth building (architecture, reliability, product, record), and
+  files up to N evidence-backed `ideas/` plans, pre-approved only where `## Approval` frees
+  them. Plans only; feeds `review-ideas` and `advance-plans`.
 
 **Scripts**
 
