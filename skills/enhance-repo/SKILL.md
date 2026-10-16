@@ -20,7 +20,7 @@ it: everything lands in `docs/plans/ideas/`; `review-ideas` and the user move id
 | source dirs, languages, test harness, domain invariants | `AGENTS.md`, README, any sub-directory `AGENTS.md` and domain skills it names |
 | base branch | `.agents/land.config.json` `baseBranch`, else `AGENTS.md`, else `origin/HEAD` |
 | commit subject format (conventional or `<scope>: …`), PR labels, review loops a PR must pass | `AGENTS.md`, `.agents/land.config.json` |
-| where worktrees live | the caller's scratch path if it gives one, else `AGENTS.md`, else a scratch dir outside the repo |
+| where worktrees live | the caller's scratch path if it gives one — this beats an in-repo location in `AGENTS.md` — else `AGENTS.md`, else a scratch dir outside the repo |
 | plan validator | `scripts/plans-map.js --validate` if present; in a record repo, also its own health check (e.g. `record-check.py`) |
 | plans that live outside the repo but cover it | the workspace's cross-repo plans and any upstream convention repo `AGENTS.md` names |
 | trailers the repo's plan skills query (`Reviewed-Idea:`, `Pre-Approved:`) | used only if `review-ideas`/`advance-plans` are wired, or `AGENTS.md` names them |
@@ -52,7 +52,7 @@ is not.
 directories (manuscripts, a design kit) that declare no perimeter is **code**.
 - No `## Approval` section → every plan will be **needs a yes**; skip the pre-approval
   analysis in §5 and spend the effort on evidence instead.
-- Read-only git in the main checkout (`status`, `log`, `show`, `diff`). All writes happen
+- Read-only git in the main checkout (`fetch`, `status`, `log`, `show`, `diff`). All writes happen
   in a detached worktree of `origin/<base>` (location: the facts table), removed once
   pushed. A dry run needs no worktree. Never write in a main checkout another session may be using.
 - **Budget.** Aim to finish in well under an hour of agent time. Never block on a slow
@@ -73,14 +73,18 @@ when a candidate touches it; a repo with 50+ docs makes "read everything" the wh
 Incidents are prime reliability evidence: "what still bites" lives there.
 
 **Fix commits.** Match the repo's commit style, not conventional commits alone: grep the
-subject for `fix|revert|hotfix|crash|broke|regress` (`git log -i -E --grep=…`).
+subject for `fix|revert|hotfix|crash|broke|regress` (`git log -i -E --grep=…`). On config
+files the count is noisy (tuning commits say "fix" too): read the subjects before trusting
+it.
 
 Then per lens:
 
 **architecture** (code). Rank files by churn × size, boosted by fix density and by
 co-change partners in a *different* module (a seam that leaks). "Code" includes config
 that behaves like code — playbooks, compose files, Dockerfiles, CI workflows, SQL —
-so in an infra repo rank YAML too; exclude lockfiles, generated files and prose docs.
+so in an infra repo rank YAML too (default: `yml|yaml|py|sh|j2|Dockerfile|Makefile`);
+exclude lockfiles, generated files and prose docs. For a very large file, or a repo laid
+out by module (`services/<svc>`), compute co-change per module rather than per file.
 Shared resource files every feature touches (locale strings, lockfiles, barrel exports)
 are not co-change evidence. Renames split a file's history: fold the old path's counts
 into the new one and drop paths that no longer exist on `origin/<base>`.
@@ -131,6 +135,10 @@ out-of-repo plans in the facts table), and list open PRs (`gh pr list --state op
   repo's rules allow it, in the same commit (in `--dry-run`, write the corrected copy to
   `<out>/<repo>/_fixed/`).
 - An open PR that is stale or superseded → report it as `NOTE`; never close it.
+- An open PR that *adds a plan* or redesign covering the candidate → treat it as already
+  planned; drop it.
+- The code is scheduled to leave the repo (a ready/ongoing plan moves it elsewhere) →
+  drop it here, and `NOTE` it for the destination repo.
 - A stale fact outside the plans (an `AGENTS.md` list, a README) → report it as `STALE`;
   this pass files plans and does not edit other docs.
 - A decision record forbids the shape → drop it, or address the decision in the plan.
@@ -141,7 +149,9 @@ out-of-repo plans in the facts table), and list open PRs (`gh pr list --state op
 With three candidates or fewer, or when you cannot dispatch subagents, work inline and
 keep the A/B/C sketches to a paragraph each — scouts cost more than they save there. When
 the repo already prescribes the shape (an existing pattern the design should follow), say
-so and skip the alternatives. Above
+so and skip the alternatives. A mechanical refactor whose shapes barely differ gets one
+line on the alternatives, not three designs. Write each scout's findings to a file in your
+scratch directory as they arrive, so a pass that is cut short can resume. Above
 that, if you can dispatch subagents, do each phase in **one message** for all candidates at
 once, **in the foreground** (`run_in_background: false`), so their reports come back to
 you. A backgrounded scout reports to whoever is at the top of the session, not to you:
@@ -165,7 +175,9 @@ Drop: cosmetic friction (a long file that rarely changes and never breaks — no
 mode); anything that contradicts a domain invariant you cannot resolve; anything whose
 honest benefit is "nicer". Rank the rest — architecture/reliability by cost saved or risk
 removed (churn × modules a change must touch × fix density), product/record by how far
-they move the repo's purpose. Keep at most `N`; prefer a mix of lenses when scores are
+they move the repo's purpose. When two candidates are one change seen twice, split along
+refactor vs behaviour lines and say in each plan's Design which builds first (a sequencing
+note, not a gate). Keep at most `N`; prefer a mix of lenses when scores are
 close.
 
 ## 5. Classify — this decides the gate and the trailer
@@ -176,7 +188,9 @@ close.
 | changes what a user sees or can do, a product rule, a permission, a contract, stored data shape beyond a following migration, running cost; or the repo has no `## Approval`; or you are unsure | **needs a yes** — `**Gate:** decision:<the single question>` |
 | mixes both | split it if the pre-approved half is useful alone; otherwise the whole plan needs a yes |
 
-A wrong pre-approval gets built without anyone asking; a wrong `decision:` costs one
+A needs-yes idea always carries its `decision:` gate, even where the repo's own docs
+mention `Gate` only for `ongoing/` — the standard allows it on any plan, and the builders
+bucket on it. A wrong pre-approval gets built without anyone asking; a wrong `decision:` costs one
 message. Product plans almost always need a yes. A plan whose Paths hit the repo's
 hard-stop list (`.agents/land.config.json` `hardStop`, or the list in `AGENTS.md`) says so
 in its Approval section: its PR will never self-merge. A pre-approved plan has no open
@@ -261,8 +275,8 @@ FILED <slug> | <lens> | <priority> | pre-approved|needs-yes | <one line>
 QUESTION <slug> | <the question> | recommended: <answer>
 DROPPED <candidate> | <reason>
 FIXED <plan> | <stale fact corrected>
-STALE <file> | <stale fact outside the plans, not edited>
-NOTE <what> | <why the user should know> (a stale PR, a plan whose premise changed)
+STALE <file[:line]> | <stale fact outside the plans, not edited>
+NOTE <what> | <why the user should know> (a stale PR, a plan whose premise changed, a lead from a prior run that proved wrong)
 PENDING <candidate> | <what was still unchecked when the pass stopped>
 LANDED <sha on base> | PR <url> | DRY-RUN <dir> | NOTHING
 BLOCKED <step> | <why>        (only if something stopped you)
