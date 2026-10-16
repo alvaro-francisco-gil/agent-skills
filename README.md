@@ -58,6 +58,9 @@ multiple projects as a git submodule so a single copy is the source of truth.
   stops only this worktree's lander (`--kill`), never another's.
 - **scripts/ideas-review-order.js** — ideas by last review, oldest first, from git history
   and `Reviewed-Idea:` trailers. `review-ideas`' queue.
+- **scripts/enhance-measure.js** — `enhance-repo`'s evidence as JSON: churn × size × fix
+  density with rename-folded history, co-change, the backlog by title, `## Approval` /
+  `## Enhance`, hard stops, open PRs and the size signals that decide fan-out. Read-only.
 - **scripts/agent-auto-mode.js** — installs the repo's `.agents/auto-mode.json` policy into
   the user's Claude Code settings (see *Auto-mode policy*).
 
@@ -211,6 +214,17 @@ review gate rather than silently auto-merging something it never declared.
   no automated reviewer exists, and expect `ship-a-feature` to say so out loud.
 - With no reviewer bot, also set `"reviewLabel": null`, so the loop does not create a label
   nothing listens to.
+
+### Adding the enhancement pass
+
+`enhance-repo` needs nothing else wired:
+
+```sh
+ln -s ../_shared/skills/enhance-repo .agents/skills/enhance-repo
+ln -s ../.agents/_shared/scripts/enhance-measure.js scripts/enhance-measure.js
+```
+
+Optionally add a `## Enhance` section to `AGENTS.md` (format in the skill).
 
 ### Adding the orchestration layer
 
