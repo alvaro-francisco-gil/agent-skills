@@ -797,7 +797,8 @@ test('headCarriesWorkBeyond: an unreachable head keeps the old reading', () => {
 // checkout must follow it, or the next run's preflight reads the tree as dirty.
 const { rebaseOnto } = require('../pr-land.js');
 
-test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the recorded commit', () => {
+/** A repo whose `develop` bumped submodule `lib` to `bumpTo` (a real commit by default) after `feature` branched. */
+function repoWithSubmoduleBump({ bumpTo } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'land-submodule-'));
   const run = (cwd, cmd) => execSync(`git -c user.name=t -c user.email=t@t -c protocol.file.allow=always ${cmd}`, { cwd, stdio: 'pipe' }).toString().trim();
   const commit = (cwd, msg) => run(cwd, `commit -qam ${msg}`);
@@ -815,16 +816,24 @@ test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the r
   run(repo, 'add f.txt');
   commit(repo, 'feature');
 
-  fs.writeFileSync(path.join(lib, 'v.txt'), '2\n');
-  commit(lib, 'v2');
-  const bumped = run(lib, 'rev-parse HEAD');
   run(repo, 'checkout -q develop');
-  run(path.join(repo, 'lib'), 'pull -q origin main');
-  commit(repo, 'bump');
+  if (bumpTo) {
+    run(repo, `update-index --cacheinfo 160000,${bumpTo},lib`);
+  } else {
+    fs.writeFileSync(path.join(lib, 'v.txt'), '2\n');
+    commit(lib, 'v2');
+    run(path.join(repo, 'lib'), 'pull -q origin main');
+    run(repo, 'add lib');
+  }
+  run(repo, 'commit -qm bump');
+  const bumped = run(repo, 'rev-parse develop:lib');
   run(repo, 'checkout -q feature');
   run(repo, 'submodule update');
+  return { repo, run, bumped };
+}
 
-  // The rebase commits, so it needs an identity a bare CI runner does not have.
+/** Runs `fn` with the git config the rebase needs on a bare CI runner: an identity, and file:// submodules. */
+function withRebaseGitEnv(fn) {
   const gitEnv = {
     GIT_CONFIG_COUNT: '3',
     GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'always',
@@ -833,10 +842,27 @@ test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the r
   };
   Object.assign(process.env, gitEnv);
   try {
-    inRepo(repo, () => rebaseOnto('develop'));
+    return fn();
   } finally {
     for (const key of Object.keys(gitEnv)) delete process.env[key];
   }
+}
+
+test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the recorded commit', () => {
+  const { repo, run, bumped } = repoWithSubmoduleBump();
+  withRebaseGitEnv(() => inRepo(repo, () => rebaseOnto('develop')));
   assert.equal(run(repo, 'status --porcelain'), '', 'no submodule left behind its recorded commit');
   assert.equal(run(path.join(repo, 'lib'), 'rev-parse HEAD'), bumped);
+});
+
+test('rebaseOnto: a submodule that cannot be updated is reported, with the rebase kept for the next run', () => {
+  const unreachable = '0123456789abcdef0123456789abcdef01234567';
+  const { repo, run } = repoWithSubmoduleBump({ bumpTo: unreachable });
+  assert.throws(
+    () => withRebaseGitEnv(() => inRepo(repo, () => rebaseOnto('develop'))),
+    /rebased, but `git submodule update` failed — run it, then re-run/,
+  );
+  assert.equal(run(repo, 'rev-parse --abbrev-ref HEAD'), 'feature', 'the branch is not left mid-rebase');
+  assert.equal(run(repo, 'merge-base --is-ancestor develop HEAD && echo yes'), 'yes', 'the rebase itself is kept');
+  assert.equal(run(repo, 'rev-parse HEAD:lib'), unreachable, 'the tree records the base\'s pointer');
 });
