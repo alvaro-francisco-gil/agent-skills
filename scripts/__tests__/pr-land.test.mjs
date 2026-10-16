@@ -824,13 +824,18 @@ test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the r
   run(repo, 'checkout -q feature');
   run(repo, 'submodule update');
 
-  process.env.GIT_CONFIG_COUNT = '1';
-  process.env.GIT_CONFIG_KEY_0 = 'protocol.file.allow';
-  process.env.GIT_CONFIG_VALUE_0 = 'always';
+  // The rebase commits, so it needs an identity a bare CI runner does not have.
+  const gitEnv = {
+    GIT_CONFIG_COUNT: '3',
+    GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'always',
+    GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 't',
+    GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: 't@t',
+  };
+  Object.assign(process.env, gitEnv);
   try {
     inRepo(repo, () => rebaseOnto('develop'));
   } finally {
-    delete process.env.GIT_CONFIG_COUNT; delete process.env.GIT_CONFIG_KEY_0; delete process.env.GIT_CONFIG_VALUE_0;
+    for (const key of Object.keys(gitEnv)) delete process.env[key];
   }
   assert.equal(run(repo, 'status --porcelain'), '', 'no submodule left behind its recorded commit');
   assert.equal(run(path.join(repo, 'lib'), 'rev-parse HEAD'), bumped);
