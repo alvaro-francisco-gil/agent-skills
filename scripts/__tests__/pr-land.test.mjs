@@ -792,3 +792,46 @@ test('headCarriesWorkBeyond: an unreachable head keeps the old reading', () => {
   const ghost = '0123456789abcdef0123456789abcdef01234567';
   assert.equal(inRepo(clone, () => headCarriesWorkBeyond({ number: 99, headRefOid: ghost })), false);
 });
+
+// A base that bumps a submodule: the rebase moves the recorded commit, and the
+// checkout must follow it, or the next run's preflight reads the tree as dirty.
+const { rebaseOnto } = require('../pr-land.js');
+
+test('rebaseOnto: a base that bumped a submodule leaves the tree clean, at the recorded commit', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'land-submodule-'));
+  const run = (cwd, cmd) => execSync(`git -c user.name=t -c user.email=t@t -c protocol.file.allow=always ${cmd}`, { cwd, stdio: 'pipe' }).toString().trim();
+  const commit = (cwd, msg) => run(cwd, `commit -qam ${msg}`);
+  const lib = path.join(tmp, 'lib');
+  run(tmp, `init -q -b main ${lib}`);
+  fs.writeFileSync(path.join(lib, 'v.txt'), '1\n');
+  run(lib, 'add .');
+  commit(lib, 'v1');
+  const repo = path.join(tmp, 'repo');
+  run(tmp, `init -q -b develop ${repo}`);
+  run(repo, `submodule add -q ${lib} lib`);
+  commit(repo, 'base');
+  run(repo, 'checkout -qb feature');
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'f\n');
+  run(repo, 'add f.txt');
+  commit(repo, 'feature');
+
+  fs.writeFileSync(path.join(lib, 'v.txt'), '2\n');
+  commit(lib, 'v2');
+  const bumped = run(lib, 'rev-parse HEAD');
+  run(repo, 'checkout -q develop');
+  run(path.join(repo, 'lib'), 'pull -q origin main');
+  commit(repo, 'bump');
+  run(repo, 'checkout -q feature');
+  run(repo, 'submodule update');
+
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'protocol.file.allow';
+  process.env.GIT_CONFIG_VALUE_0 = 'always';
+  try {
+    inRepo(repo, () => rebaseOnto('develop'));
+  } finally {
+    delete process.env.GIT_CONFIG_COUNT; delete process.env.GIT_CONFIG_KEY_0; delete process.env.GIT_CONFIG_VALUE_0;
+  }
+  assert.equal(run(repo, 'status --porcelain'), '', 'no submodule left behind its recorded commit');
+  assert.equal(run(path.join(repo, 'lib'), 'rev-parse HEAD'), bumped);
+});

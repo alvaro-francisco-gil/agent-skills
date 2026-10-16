@@ -837,6 +837,26 @@ function killProcessesUnder(dir) {
 const INTEGRATION_CHECK_CANNOT_RUN = 3;
 
 /**
+ * Rebases HEAD onto `upstream` and moves every initialized submodule to the commit
+ * the rebased tree records. A rebase moves a submodule's recorded commit but never
+ * its checkout, so without the sync a base that bumped the submodule leaves the
+ * tree dirty and the next run stops at preflight (exit 40) over a change nobody made.
+ */
+function rebaseOnto(upstream) {
+  try {
+    sh(`git rebase ${upstream}`);
+  } catch (err) {
+    sh('git rebase --abort', { allowFail: true });
+    throw new Error(`rebase conflicted — resolve by hand, then re-run.\n${err.message}`);
+  }
+  try {
+    sh('git submodule update');
+  } catch (err) {
+    throw new Error(`rebased, but \`git submodule update\` failed — run it, then re-run.\n${err.message}`);
+  }
+}
+
+/**
  * One check at a time per clone. Each is a full install plus every typecheck and
  * test runner, and parallel workers landing together (all worktrees of one clone)
  * would otherwise run them side by side on a dev box with no RAM budget. The lock
@@ -958,12 +978,7 @@ function act(action, s) {
 
     case ACTION.REBASE: {
       if (DRY_RUN) return log('  [dry-run] would rebase');
-      try {
-        sh(`git rebase origin/${CONFIG.baseBranch}`);
-      } catch (err) {
-        sh('git rebase --abort', { allowFail: true });
-        throw new Error(`rebase conflicted — resolve by hand, then re-run.\n${err.message}`);
-      }
+      rebaseOnto(`origin/${CONFIG.baseBranch}`);
       sh(`git push --force-with-lease origin ${s.branch.name}`);
       return log('  rebased and pushed — CI and review re-run against the new head');
     }
@@ -1162,5 +1177,5 @@ module.exports = {
   loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
   runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
-  checksVerdict, runIdOf, queueStateFrom, pickBranchPr, headCarriesWorkBeyond,
+  checksVerdict, runIdOf, queueStateFrom, pickBranchPr, headCarriesWorkBeyond, rebaseOnto,
 };
