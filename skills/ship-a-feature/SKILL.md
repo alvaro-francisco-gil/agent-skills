@@ -89,11 +89,14 @@ inherit your implementation reasoning, or it will approve your blind spots — t
 - the repo's own **pre-push review checklist**, if its `AGENTS.md` has one — the findings
   its reviewer raises most often, which is where this pass pays most.
 
-Fix what it finds that holds up, then push. One pass, not a loop: the remote reviewer is
-still the merge gate, and this pass only exists to make its first verdict an approval.
+Fix what it finds that holds up, **re-run the local gates on the result**, then push — a
+fix made after the gates went green is otherwise pushed untested. One pass, not a loop: the
+remote reviewer is still the merge gate, and this pass only exists to make its first
+verdict an approval.
 
-**Do the same before pushing a fix for exit `20`**, on the fix's own diff: a fix that
-introduces a new finding spends a second round on the same problem.
+**Do the same before pushing a fix for exit `20`** — local gates, then the review on the
+fix's own diff, then the gates again if that review changed anything: a fix that introduces
+a new finding spends a second round on the same problem.
 
 ## Step 4 — Land
 
