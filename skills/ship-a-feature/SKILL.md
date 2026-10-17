@@ -70,6 +70,31 @@ On `go` (or an explicit choice), start immediately. No "shall I begin?".
   CI sets `cancel-in-progress`, every intermediate push burns a runner slot and cancels its
   predecessor's run.
 
+### Before the push — review your own diff
+
+"Ready" includes having been reviewed. Where the repo has an automated reviewer, every
+`CHANGES_REQUESTED` costs a full round: a push, a CI run, and the reviewer's own latency,
+all on the critical path, and a capped budget besides. A local review costs minutes and no
+lane, so catch there what the reviewer would catch.
+
+Once the local gates are green, dispatch **one fresh-context subagent** — it must not
+inherit your implementation reasoning, or it will approve your blind spots — to review
+`git diff <base>...HEAD` with the reviewer's stance:
+
+- correctness, regressions in callers the diff did not touch, security, operational risk;
+- **every behavioural change ships with a test that would fail if the change were
+  reverted**, asserting real behaviour, with the obvious edge cases covered — the most
+  common single reason a reviewer requests changes;
+- docs, comments and plans the diff made untrue;
+- the repo's own **pre-push review checklist**, if its `AGENTS.md` has one — the findings
+  its reviewer raises most often, which is where this pass pays most.
+
+Fix what it finds that holds up, then push. One pass, not a loop: the remote reviewer is
+still the merge gate, and this pass only exists to make its first verdict an approval.
+
+**Do the same before pushing a fix for exit `20`**, on the fix's own diff: a fix that
+introduces a new finding spends a second round on the same problem.
+
 ## Step 4 — Land
 
 ```bash
@@ -173,3 +198,4 @@ this skill replaces the *intake and integration* ceremony, not the engineering r
 | "I'll ask which mode they want" | Classify from the diff. Step 0. |
 | "The user gave a vague `go`, so I'll ask for detail" | `go` means *take all your picks*. Take them. |
 | "No reviewer here, so green CI is the same bar" | It is a weaker bar. Name that in Step 2. |
+| "The reviewer will catch it anyway" | It will, one round later. Review your own diff before the push. |
