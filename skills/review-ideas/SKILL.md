@@ -5,7 +5,7 @@ description: Use when the user wants docs/plans/ideas/ checked against the code 
 
 # Review ideas — check the backlog against the code
 
-`ideas/` is the unswept inbox, and its plans lie: on 2026-10-03 all 10 of the most overdue ideas carried a false claim (9 rewritten, 1 obsolete), and two prod re-reads changed what their plans said. This skill is the recurring check that keeps that rate down. It is a **docs-only** batch: read-only scouts verify, one leader runs git, nothing is implemented, and **nothing reaches `ready/` without the user's yes** — `ready/` means *approved* (the repo's `AGENTS.md` `## Approval`; without that section nothing is pre-approved and every PROMOTE is NEEDS-YES). Its product is those yeses, asked on facts it has just verified. An idea the standing policy already pre-approves needs no yes and no move: the review tags it (§4) and `advance-plans` builds it straight from `ideas/`.
+`ideas/` is the unswept inbox, and its plans lie: on 2026-10-31, 48 of the 60 least recently reviewed ideas (80%) carried a false claim or a shipped part, and 9 of them were deleted. This skill is the recurring check that keeps that rate down. It is a **docs-only** batch: read-only scouts verify, one leader runs git, nothing is implemented, and **nothing reaches `ready/` without the user's yes** — `ready/` means *approved* (the repo's `AGENTS.md` `## Approval`; without that section nothing is pre-approved and every PROMOTE is NEEDS-YES). Its product is those yeses, asked on facts it has just verified. An idea the standing policy already pre-approves needs no yes and no move: the review tags it (§4) and `advance-plans` builds it straight from `ideas/`.
 
 **It is not an `orchestrate` batch.** No PRs, no CI lanes, no tmux: scouts are in-session background subagents (Agent tool), about 15 ideas each, at most 8 at once — the ceiling is usage quota, which the reviewer and every other session share. Repo facts (`<project>`, `<base>`, `<wt-dir>`) are `orchestrate`'s. It may run beside an implementation batch: it edits `ideas/` bodies, and touches anything else only to fix a backlink, under §4's rules.
 
@@ -90,11 +90,19 @@ Report one line per file: <slug> | <verdict> | <evidence> | <edit made>.
 
 ## 5. One message to the user
 
-Push the mechanical results first — they need no answer. Record each verdict in `batch.json` **with its one-line reason**, never the bare word: the reason is what the report is built from, and what a later run reads. **Dispatched by another session that is the user's interface** (the prompt or a message from it says so)? The message goes to that session with `SendMessage`, not to your own window, which nobody is reading; act on its relays for reversible plan edits, and name in the block any item you need the user to confirm in your own window. Then **one** message: counts per verdict, the staleness rate (non-VALID ÷ reviewed), each deletion with its SHA, held deletions and fenced findings, and `orchestrate`'s **Needs your decision** block, one entry each, with your pick:
+Push the mechanical results first — they need no answer. Record each verdict in `batch.json` **with its one-line reason**, never the bare word: the reason is what the report is built from, and what a later run reads. **Dispatched by another session that is the user's interface** (the prompt or a message from it says so)? The message goes to that session with `SendMessage`, not to your own window, which nobody is reading; act on its relays for reversible plan edits, and name in the block any item you need the user to confirm in your own window. Then **one** message: counts per verdict, the staleness rate (non-VALID ÷ reviewed), each deletion with its SHA, held deletions and fenced findings, and the link to the **decision page** (below). The page carries `orchestrate`'s **Needs your decision** block, one entry each, with your pick:
 
 - **PROMOTE, NEEDS-YES** → on yes, the leader writes the user's answers into the plan and `git mv`s it to `ready/`, one commit per plan with its trailer. **No File Structure, no Tasks** — the agent that starts the work writes those against that day's code (approve early, plan late — `managing-plans-lifecycle`). List them ranked by priority. A PRE-APPROVED one is not in this block and is not moved: it stays in `ideas/` with its `Pre-Approved:` trailer, and the report lists it under **buildable now** — `advance-plans` takes it from there, and its worker re-checks the class before building;
 - **SHIPPED-UNVERIFIED / IN-FLIGHT** → move to `ongoing/` with a `release:`/`soak:`/`blocked:` gate — after any live `advance-plans` leader has wound down;
 - **DECISION**, and another human's OBSOLETE ideas.
+
+**The decisions go on a web page, with pictures, not in a long chat message** (decided 2026-10-31, user: text alone was not enough to decide on). Each decision is a self-contained card: the question in one line, then what it looks like, so the user judges the thing and not a description of it:
+- a **user-visible change** → a before/after mockup of the screen (an HTML/SVG sketch of the real layout and copy — what the user sees today, what they would see), one per option;
+- a **cost** → the numbers: the unit price with its source, the measured volume, the monthly total at today's volume and at 10×;
+- a **mechanism or flow** → a small diagram of who writes what, today and after;
+- a **term the plan uses** ("a short round", "a derived rail") → a concrete example drawn from real data or a fixture.
+
+Then the options side by side, your pick marked with the one reason that decides it, and the reply token. Publish it with the session's artifact publisher when there is one — and **republish the same page** at each re-render rather than starting a new one; otherwise write one self-contained HTML file to the scratchpad and give its absolute path. The chat message stays short: the summary above, the link, and as its last lines the numbered reply tokens, since the user reads the end of the message.
 
 Report the pinned-retirement PR by number and outcome — it is done, not asked.
 
@@ -124,3 +132,4 @@ Every snapshot idea has a verdict in `batch.json`; every one without a fence or 
 | Deleting an idea backlinked from `ongoing/`/`ready/` while their leader is live | Rewrite it as shipped and report it |
 | Fencing with `gh pr list --search` or `git log --all` | `--json files`; `git diff origin/<base>...<ref>` |
 | Working in the main checkout | Detached worktree at `origin/<base>` |
+| The decision block as a long chat message | A web page, one visual card per decision; the chat carries the link and the reply tokens |
