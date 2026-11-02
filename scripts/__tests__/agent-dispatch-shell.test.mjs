@@ -208,7 +208,8 @@ test('--resume continues the worker in its existing worktree and creates nothing
 test('a worker changes into its worktree itself, since a tmux server can ignore -c', () => {
   const { root, prompt } = fixtureRepo();
   const r = dispatch(root, '--dry-run', 'w9-cwd', 'feat/cwd', prompt);
-  const launch = `${r.stdout}${r.stderr}`;
+  // --dry-run prints through %q, which backslash-escapes the launch command.
+  const launch = `${r.stdout}${r.stderr}`.replaceAll('\\', '');
   assert.match(launch, /WORKTREE=\S*w9-cwd/);
   assert.match(launch, /cd "\$WORKTREE" &&/);
 });
