@@ -127,8 +127,10 @@ case "${1:-}" in
     fi
 
     tmux has-session -t "$win" 2>/dev/null || tmux new-session -d -s "$win" -c "$root"
+    # `-c` alone is not enough: a tmux server whose own directory was deleted (a
+    # reaped worktree) starts panes there, and the lander dies on uv_cwd ENOENT.
     tmux new-window -t "$win" -c "$root" \
-      "pnpm pr:land; code=\$?; echo; echo \"=== pr:land exit \$code ===\"; \
+      "cd $(printf '%q' "$root") && pnpm pr:land; code=\$?; echo; echo \"=== pr:land exit \$code ===\"; \
        echo '0 merged · 10 CI red · 20 changes requested · 30 hand to a human · 40 preflight'; \
        echo '143 is SIGTERM — not an outcome. Read GitHub: gh pr view <n> --json state,mergedAt'; \
        sleep 100000"

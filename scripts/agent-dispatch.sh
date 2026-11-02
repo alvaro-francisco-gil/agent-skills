@@ -124,11 +124,12 @@ fi
 
 # The prompt is read from the file inside the window, so no quoting layer ever
 # sees it. The trailing sleep keeps the window, and the worker's last output,
-# alive after it exits.
+# alive after it exits. The `cd` is because a tmux server whose own directory was
+# deleted (a reaped worktree) ignores `-c` and starts panes there.
 # shellcheck disable=SC2016
-LAUNCH='"$@" ${PROMPT_FILE:+"$(cat "$PROMPT_FILE")"}; echo "[worker exited $?]"; sleep 100000'
+LAUNCH='cd "$WORKTREE" && "$@" ${PROMPT_FILE:+"$(cat "$PROMPT_FILE")"}; echo "[worker exited $?]"; sleep 100000'
 run tmux new-window -d -t "$SESSION:" -n "$NAME" -c "$WORKTREE" \
-  -e "PROMPT_FILE=$PROMPT_FILE" bash -c "$LAUNCH" _ "${CLAUDE_ARGS[@]}"
+  -e "WORKTREE=$WORKTREE" -e "PROMPT_FILE=$PROMPT_FILE" bash -c "$LAUNCH" _ "${CLAUDE_ARGS[@]}"
 LAUNCHED=1
 
 if [[ $DRY_RUN -eq 1 ]]; then exit 0; fi
