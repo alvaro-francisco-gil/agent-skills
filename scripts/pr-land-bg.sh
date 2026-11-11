@@ -33,77 +33,84 @@ repo_root() { git rev-parse --show-toplevel; }
 # once cannot collide and neither can guess it is the other's.
 window_name() { echo "land-$(basename "$(repo_root)")"; }
 
-# Every lander whose working directory is inside THIS worktree — the pnpm wrapper
-# and its node child alike.
+# Every lander whose working directory is inside THIS worktree — the pnpm `sh -c`
+# wrapper and its node child alike — one pid per line, ascending.
 #
-# Selection is deliberately NOT a substring match on the joined command line.
-# `pgrep -f scripts/pr-land.js` also matches any process that merely MENTIONS the
-# path — an editor, a grep, and (measured, which is how this was caught before it
-# shipped) a Claude session carrying these very instructions in its prompt. A
-# --kill built on that would kill the agent instead of the lander.
+# Selection is deliberately NOT a substring match on the command line. `pgrep -f
+# scripts/pr-land.js` also matches any process that merely MENTIONS the path — an
+# editor, a grep, the calling shell, and (measured, which is how this was caught
+# before it shipped) a Claude session carrying these very instructions in its
+# prompt. A --kill built on that would kill the agent instead of the lander.
 #
-# So: read argv from /proc/<pid>/cmdline, split on NUL, require argv[0] to be a
-# shell or node rather than anything that merely quotes the path, and require an
-# argument that IS the script. Then filter by cwd. `readlink` on another user's
-# pid fails and a pid can exit mid-scan: both are skipped, never fatal, or a
-# stale pid would abort a --kill that has real work to do.
+# So the whole command line must BE a lander (`is_lander_cmdline`), then the pid is
+# filtered by cwd. A pid that exits mid-scan, or whose cwd we may not read, is
+# skipped, never fatal, or a stale pid would abort a --kill with real work to do.
+#
+# Portable on purpose: macOS ships bash 3.2 (no mapfile, and `"${a[@]}"` of an
+# empty array is fatal under `set -u`), no /proc and no `tac`. `ps -A -ww -o args=`
+# and `process_cwd` are the only process facts read, and both work on both.
 landers_here() {
-  local root pid argv argv0 arg hit cwd
+  local root pid args cwd
   root="$(repo_root)"
-  for procdir in /proc/[0-9]*; do
-    pid="${procdir#/proc/}"
-    [[ -r "$procdir/cmdline" ]] || continue
-    mapfile -d '' -t argv < "$procdir/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -gt 0 ]] || continue
-
-    argv0="$(basename -- "${argv[0]:-}")"
-    case "$argv0" in sh|bash|dash|node|nodejs|pnpm) ;; *) continue ;; esac
-
-    hit=no
-    for arg in "${argv[@]}"; do
-      # The node child carries the path as its own argument; the `sh -c` wrapper
-      # carries the whole command as one string.
-      if [[ "$arg" == "$LANDER" || "$arg" == */"$LANDER" \
-            || "$arg" == "node $LANDER" || "$arg" == *"/node $LANDER" ]]; then
-        hit=yes
-        break
-      fi
-    done
-    [[ "$hit" == yes ]] || continue
-
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
-    [[ "$cwd" == "$root" || "$cwd" == "$root"/* ]] && echo "$pid"
-  done
+  ps -A -ww -o pid= -o args= | while read -r pid args; do
+    is_lander_cmdline "$args" || continue
+    cwd="$(process_cwd "$pid")" || continue
+    if [[ "$cwd" == "$root" || "$cwd" == "$root"/* ]]; then echo "$pid"; fi
+  done | sort -n
 }
+
+# The two shapes a lander takes, as whole command lines: the node child
+# (`node [<dir>/]scripts/pr-land.js [args]`) and, where the shell does not exec it,
+# pnpm's wrapper (`sh -c 'node scripts/pr-land.js [args]'`). argv[0] must itself be
+# node or a POSIX shell, so a grep, an editor or an agent quoting the path never
+# matches. Paths are taken to contain no spaces; pnpm passes the relative one.
+is_lander_cmdline() {
+  local bin='([^ ]*/)?' script='([^ ]*/)?scripts/pr-land\.js( .*)?$'
+  local node_child="^${bin}(node|nodejs) ${script}"
+  local sh_wrapper="^${bin}(sh|bash|dash) -c ${bin}node ${script}"
+  [[ "$1" =~ $node_child || "$1" =~ $sh_wrapper ]]
+}
+
+# /proc where there is one (Linux); lsof where there is not (macOS).
+process_cwd() {
+  if [[ -d /proc/$1 ]]; then
+    readlink "/proc/$1/cwd" 2>/dev/null
+  else
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | grep .
+  fi
+}
+
+# A newline-separated pid list in reverse, without `tac` (absent on macOS).
+reverse_lines() { awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }'; }
 
 case "${1:-}" in
   --help|-h) usage; exit 0 ;;
 
   --status)
-    mapfile -t pids < <(landers_here)
-    if [[ ${#pids[@]} -eq 0 ]]; then
+    pids="$(landers_here)"
+    if [[ -z "$pids" ]]; then
       echo "no lander running for $(repo_root)"
       exit 1
     fi
     echo "lander running for $(repo_root):"
-    ps -o pid=,etime=,args= -p "$(IFS=,; echo "${pids[*]}")"
+    ps -ww -o pid=,etime=,args= -p "$(echo "$pids" | paste -sd, -)"
     ;;
 
   --kill)
-    mapfile -t pids < <(landers_here)
-    if [[ ${#pids[@]} -eq 0 ]]; then
+    pids="$(landers_here)"
+    if [[ -z "$pids" ]]; then
       echo "no lander of this worktree to kill (other worktrees' landers left alone)"
       exit 0
     fi
     # TERM the child before its wrapper: the reverse order is what orphans it.
-    for pid in $(printf '%s\n' "${pids[@]}" | tac); do
+    for pid in $(echo "$pids" | reverse_lines); do
       kill "$pid" 2>/dev/null && echo "stopped $pid" || true
     done
     sleep 1
-    mapfile -t survivors < <(landers_here)
-    if [[ ${#survivors[@]} -gt 0 ]]; then
-      echo "still alive after TERM, sending KILL: ${survivors[*]}"
-      kill -9 "${survivors[@]}" 2>/dev/null || true
+    survivors="$(landers_here)"
+    if [[ -n "$survivors" ]]; then
+      echo "still alive after TERM, sending KILL:" $survivors
+      kill -9 $survivors 2>/dev/null || true
     fi
     tmux kill-session -t "$(window_name)" 2>/dev/null || true
     ;;
