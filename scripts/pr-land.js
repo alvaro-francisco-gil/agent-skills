@@ -539,15 +539,20 @@ function queueStateFrom(node) {
   if (!node) return null;
   const head = node.commits?.nodes?.[0]?.commit;
   const headAt = head?.committedDate ? Date.parse(head.committedDate) : 0;
-  const failures = (node.timelineItems?.nodes || [])
+  const removals = (node.timelineItems?.nodes || [])
     .filter((e) => e && e.createdAt && Date.parse(e.createdAt) > headAt)
     .map((e) => ({ at: e.createdAt, reason: e.reason || '' }));
+  // The queue also "removes" the PR it merges, with reason MERGED, a moment
+  // before the PR itself reads as merged. That removal is a success, never a
+  // failure: counted as one, the loop re-enqueued a closed PR and exited 40.
+  const isMerge = (r) => /^merged$/i.test(r.reason.trim());
   return {
     id: node.id,
     enabled: Boolean(node.isMergeQueueEnabled),
     inQueue: Boolean(node.isInMergeQueue),
     position: node.mergeQueueEntry?.position ?? null,
-    failures,
+    merged: removals.some(isMerge),
+    failures: removals.filter((r) => !isMerge(r)),
   };
 }
 
@@ -736,7 +741,7 @@ function observe(deadlines) {
   const common = sh('git rev-parse --git-common-dir', { allowFail: true }) || '';
   const queue = pr.number && pr.state === 'open'
     ? observeQueue(pr.number)
-    : { enabled: false, inQueue: false, position: null, failures: [] };
+    : { enabled: false, inQueue: false, position: null, merged: false, failures: [] };
   const movement = baseMovement(baseChanged, files, CONFIG, { queue: Boolean(queue && queue.enabled) });
 
   return {

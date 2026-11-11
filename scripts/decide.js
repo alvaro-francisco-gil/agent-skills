@@ -323,6 +323,9 @@ function decide(s) {
       }
       return { action: ACTION.WAIT_QUEUE, why: `in the merge queue${s.queue.position ? ` (position ${s.queue.position})` : ''}` };
     }
+    if (s.queue.merged) {
+      return { action: ACTION.WAIT_QUEUE, why: 'the queue merged it — waiting for GitHub to mark the PR merged' };
+    }
     if (s.queue.failures.length >= MAX_QUEUE_ATTEMPTS) {
       return {
         exit: EXIT.CI_RED,

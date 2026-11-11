@@ -701,6 +701,20 @@ test('queue state: only removals after the current head count against it', () =>
   assert.deepEqual(q.failures.map((f) => f.reason), ['this head']);
 });
 
+test('queue state: the removal that merged the PR is a merge, not a failure', () => {
+  const { queueStateFrom } = require('../pr-land.js');
+  const q = queueStateFrom({
+    id: 'PR_1',
+    isMergeQueueEnabled: true,
+    isInMergeQueue: false,
+    mergeQueueEntry: null,
+    commits: { nodes: [{ commit: { committedDate: '2026-10-06T10:00:00Z' } }] },
+    timelineItems: { nodes: [{ createdAt: '2026-10-06T10:30:00Z', reason: 'MERGED' }] },
+  });
+  assert.equal(q.merged, true);
+  assert.deepEqual(q.failures, []);
+});
+
 test('queue state: an unreadable PR is unknown, never "no queue"', () => {
   const { queueStateFrom } = require('../pr-land.js');
   assert.equal(queueStateFrom(null), null);

@@ -459,7 +459,7 @@ test('SAFETY: protected wins over every other terminal and precondition', () => 
 // A base that requires a queue is observed, not configured, and changes what a
 // green PR's last step is: never a direct merge, never a rebase to stay current.
 
-const queued = (q = {}) => ({ id: 'PR_x', enabled: true, inQueue: false, position: null, failures: [], ...q });
+const queued = (q = {}) => ({ id: 'PR_x', enabled: true, inQueue: false, position: null, merged: false, failures: [], ...q });
 
 test('queue: a green, ungated PR is enqueued instead of merged', () => {
   const d = decide(withState({ queue: queued() }));
@@ -486,6 +486,12 @@ test('queue: one removal is retried — a single flaky lane must not hand back a
   const d = decide(withState({ queue: queued({ failures: [{ at: 't1', reason: 'CI failed' }] }) }));
   assert.equal(d.action, ACTION.ENQUEUE);
   assert.match(d.why, /CI failed/);
+});
+
+test('queue: a PR the queue merged waits for GitHub to say so — never re-enqueued', () => {
+  const d = decide(withState({ queue: queued({ merged: true }) }));
+  assert.equal(d.action, ACTION.WAIT_QUEUE);
+  assert.equal(d.exit, undefined);
 });
 
 test('queue: a second removal of the same head is CI red, with the reasons', () => {
