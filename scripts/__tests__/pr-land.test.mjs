@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const {
   hardStopHits, ciCovers, baseMovement, loadConfig, DEFAULTS, EXIT, CONFIG,
   reviewFor, integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
+  integrationScratchRoot, runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
 } = require('../pr-land.js');
 import { execSync } from 'node:child_process';
 
@@ -358,6 +358,8 @@ test('the integration check judges the MERGE RESULT, and leaves the branch alone
   const saved = CONFIG.integrationCheck;
   // The scope reaches the command, so a repo can widen what it runs.
   CONFIG.integrationCheck = { command: 'test "$PR_LAND_INTEGRATION_SCOPE" = shared && node use.js', timeoutMs: 30_000 };
+  const savedScratch = process.env.PR_LAND_SCRATCH_DIR;
+  process.env.PR_LAND_SCRATCH_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'land-scratch-'));
   try {
     process.chdir(root);
     const s = (baseTip) => ({ branch: { headSha: head }, baseTip, base: { scope: 'shared' } });
@@ -396,6 +398,46 @@ test('the integration check judges the MERGE RESULT, and leaves the branch alone
   } finally {
     process.chdir(cwd);
     CONFIG.integrationCheck = saved;
+    if (savedScratch === undefined) delete process.env.PR_LAND_SCRATCH_DIR;
+    else process.env.PR_LAND_SCRATCH_DIR = savedScratch;
+  }
+});
+
+test('the integration scratch root is on disk, never os.tmpdir() or the git dir', () => {
+  const home = os.homedir();
+  assert.equal(integrationScratchRoot({}), path.join(home, '.cache', 'pr-land'));
+  assert.equal(integrationScratchRoot({ XDG_CACHE_HOME: '/srv/cache' }), '/srv/cache/pr-land');
+  assert.equal(integrationScratchRoot({ XDG_CACHE_HOME: 'relative' }), path.join(home, '.cache', 'pr-land'), 'a relative XDG value is ignored');
+  assert.equal(integrationScratchRoot({ PR_LAND_SCRATCH_DIR: '/big/disk', XDG_CACHE_HOME: '/srv/cache' }), '/big/disk');
+  assert.ok(!integrationScratchRoot({ TMPDIR: '/tmp' }).startsWith(os.tmpdir() + path.sep));
+});
+
+test('the integration check builds and runs under the scratch root, with its TMPDIR there, and leaves nothing', () => {
+  const { root, head, cleanTip } = repoWithSemanticBreak();
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'land-scratch-')));
+  const report = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'land-report-')), 'seen');
+  const cwd = process.cwd();
+  const saved = CONFIG.integrationCheck;
+  const savedScratch = process.env.PR_LAND_SCRATCH_DIR;
+  process.env.PR_LAND_SCRATCH_DIR = path.join(scratch, 'pr-land');
+  CONFIG.integrationCheck = {
+    command: `{ pwd -P; echo "$TMPDIR"; test -d "$TMPDIR" && echo tmp-exists; } > '${report}' && node use.js`,
+    timeoutMs: 30_000,
+  };
+  try {
+    process.chdir(root);
+    assert.equal(runIntegrationCheck({ branch: { headSha: head }, baseTip: cleanTip, base: { scope: 'shared' } }), true);
+    const [ranIn, tmpdir, tmpExists] = fs.readFileSync(report, 'utf8').trim().split('\n');
+    const under = path.join(scratch, 'pr-land') + path.sep;
+    assert.ok(ranIn.startsWith(under), `ran in ${ranIn}, not under ${under}`);
+    assert.ok(tmpdir.startsWith(under), `TMPDIR ${tmpdir} is not under ${under}`);
+    assert.equal(tmpExists, 'tmp-exists');
+    assert.deepEqual(fs.readdirSync(path.join(scratch, 'pr-land')), [], 'the scratch tree is deleted after the run');
+  } finally {
+    process.chdir(cwd);
+    CONFIG.integrationCheck = saved;
+    if (savedScratch === undefined) delete process.env.PR_LAND_SCRATCH_DIR;
+    else process.env.PR_LAND_SCRATCH_DIR = savedScratch;
   }
 });
 

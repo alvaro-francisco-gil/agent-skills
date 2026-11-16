@@ -905,17 +905,38 @@ function runIntegrationCheck(s) {
   return withIntegrationLock(common, () => runIntegrationCheckLocked(s, common));
 }
 
+/**
+ * Where the integration check builds its merge result: `$PR_LAND_SCRATCH_DIR`, else
+ * `$XDG_CACHE_HOME/pr-land`, else `~/.cache/pr-land`. Never `os.tmpdir()`: /tmp is
+ * often a RAM-backed tmpfs, and a full install plus every test runner's temp files
+ * filled one (ENOSPC mid-land). Never the git common dir either: Jest ignores every
+ * path containing `/.git/`, so a check built there would find no tests.
+ */
+function integrationScratchRoot(env = process.env) {
+  if (env.PR_LAND_SCRATCH_DIR) return path.resolve(env.PR_LAND_SCRATCH_DIR);
+  // The XDG spec says a relative value is invalid and must be ignored.
+  const xdg = env.XDG_CACHE_HOME && path.isAbsolute(env.XDG_CACHE_HOME) ? env.XDG_CACHE_HOME : null;
+  return path.join(xdg || path.join(os.homedir(), '.cache'), 'pr-land');
+}
+
 function runIntegrationCheckLocked(s, common) {
   const verdictFile = integrationVerdictPath(common, s.branch.headSha);
   const scope = s.base.scope;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-land-integration-'));
+  const scratchRoot = integrationScratchRoot();
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  // `tree` holds the merge result; `tmp` is the check's TMPDIR, so the test
+  // runners' own temp files land on the same disk and go with it.
+  const dir = fs.mkdtempSync(path.join(scratchRoot, 'integration-'));
+  const tree = path.join(dir, 'tree');
+  const tmp = path.join(dir, 'tmp');
+  fs.mkdirSync(tmp);
   let ok = false;
   let error = false;
   let output = '';
   try {
-    sh(`git worktree add --detach "${dir}" ${s.baseTip}`);
+    sh(`git worktree add --detach "${tree}" ${s.baseTip}`);
     const merged = sh(
-      `git -C "${dir}" -c user.name=pr-land -c user.email=pr-land@localhost merge --no-ff --no-edit ${s.branch.headSha}`,
+      `git -C "${tree}" -c user.name=pr-land -c user.email=pr-land@localhost merge --no-ff --no-edit ${s.branch.headSha}`,
       { allowFail: true },
     );
     if (merged === null) {
@@ -925,9 +946,9 @@ function runIntegrationCheckLocked(s, common) {
       // like Jest write their report to stderr, so the concatenation put a passing
       // suite's last lines at the tail and dropped the step that actually failed.
       const r = spawnSync(`${CONFIG.integrationCheck.command} 2>&1`, {
-        cwd: dir,
+        cwd: tree,
         // "shared" or "wide" — see baseMovement. The command decides what each covers.
-        env: { ...process.env, PR_LAND_INTEGRATION_SCOPE: scope },
+        env: { ...process.env, PR_LAND_INTEGRATION_SCOPE: scope, TMPDIR: tmp, TMP: tmp, TEMP: tmp },
         shell: true,
         encoding: 'utf8',
         timeout: CONFIG.integrationCheck.timeoutMs,
@@ -1181,6 +1202,6 @@ module.exports = {
   CONFIG, DEFAULTS, EXIT, ACTION,
   loadConfig, decide, hardStopHits, ciCovers, gatesFor, requiredLanesFor, baseMovement, touches, reviewFor,
   integrationVerdictPath, readIntegrationVerdictFile, judgeIntegrationVerdict,
-  runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
+  integrationScratchRoot, runIntegrationCheck, killProcessesUnder, INTEGRATION_CHECK_CANNOT_RUN,
   checksVerdict, runIdOf, queueStateFrom, pickBranchPr, headCarriesWorkBeyond, rebaseOnto,
 };

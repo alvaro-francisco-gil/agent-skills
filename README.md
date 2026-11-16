@@ -172,7 +172,9 @@ review gate rather than silently auto-merging something it never declared.
   every CI lane and a fresh review, for every open PR, on every merge. Set
   `integrationCheck` (`{ "command": "…", "timeoutMs": 900000 }`) and `pr:land` instead
   builds the merge result in a throwaway worktree and runs that command there, once the PR
-  is green and approved. Keep it to what a shared-code move can break without touching the
+  is green and approved. That worktree, and the command's `TMPDIR`, live on disk under
+  `$PR_LAND_SCRATCH_DIR`, else `$XDG_CACHE_HOME/pr-land`, else `~/.cache/pr-land` — never
+  in `/tmp`, which is often RAM — and are deleted after the run. Keep it to what a shared-code move can break without touching the
   PR's files — typecheck and fast unit tests, not the full suite. A change to the *same
   file* on both sides still rebases.
 - **A rebase is only ever triggered by something a rebase removes**, or the loop can never
