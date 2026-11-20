@@ -54,6 +54,9 @@ multiple projects as a git submodule so a single copy is the source of truth.
 - **scripts/agent-dispatch.sh** — one worker: worktree off a fetched `origin/<base>` with its
   submodule, its own `<project>-fleet` tmux window, `claude` launched in auto mode with peer
   messages accepted, startup dialogs answered, the run confirmed started.
+- **scripts/agent-reap.sh** — reaps one finished worker: refuses (exit 2) unless its worktree is
+  clean and its HEAD is on `origin/<base>`, then stops its lander, frees its slot, closes its
+  window, removes the worktree, prunes, and `branch -d`. Never `worktree remove --force`.
 - **scripts/pr-land-bg.sh** — runs `pnpm pr:land` in a tmux session that survives, and
   stops only this worktree's lander (`--kill`), never another's.
 - **scripts/ideas-review-order.js** — ideas by last review, oldest first, from git history
@@ -235,7 +238,7 @@ that first. Then:
 
 ```sh
 for s in orchestrate advance-plans review-ideas; do ln -s ../_shared/skills/$s .agents/skills/$s; done
-for f in plans-map.js agent-env.sh agent-capacity.js agent-dispatch.sh pr-land-bg.sh \
+for f in plans-map.js agent-env.sh agent-capacity.js agent-dispatch.sh agent-reap.sh pr-land-bg.sh \
          ideas-review-order.js agent-auto-mode.js; do
   ln -s ../.agents/_shared/scripts/$f scripts/$f
 done
@@ -247,6 +250,7 @@ echo 'firebase.agent.json' >> .gitignore
 Add to `package.json`: `"plans:map": "node scripts/plans-map.js"`,
 `"agent:capacity": "node scripts/agent-capacity.js"`,
 `"agent:dispatch": "bash scripts/agent-dispatch.sh"`,
+`"agent:reap": "bash scripts/agent-reap.sh"`,
 `"agent:auto-mode": "node scripts/agent-auto-mode.js"`. Register the hook in
 `.claude/settings.json` as a `PreToolUse` hook with matcher `Bash` and command
 `$CLAUDE_PROJECT_DIR/.claude/hooks/guard-lander-kill.sh` (it needs `jq`). Then:

@@ -4,7 +4,7 @@ The autonomous delivery contract (`skills/ship-a-feature/SKILL.md`), the landing
 machine behind it (`scripts/pr-land.js`, with its decision table in `scripts/decide.js`),
 and the parallel-batch layer on top: `skills/orchestrate`, `skills/advance-plans`,
 `skills/review-ideas`, `skills/enhance-repo`, `scripts/plans-map.js`, `scripts/agent-env.sh` and the fleet scripts
-(`agent-capacity.js`, `agent-dispatch.sh`, `pr-land-bg.sh`, `ideas-review-order.js`,
+(`agent-capacity.js`, `agent-dispatch.sh`, `agent-reap.sh`, `pr-land-bg.sh`, `ideas-review-order.js`,
 `enhance-measure.js`, `agent-auto-mode.js`), plus `hooks/guard-lander-kill.sh`. `README.md` explains the wiring and every
 field of `.agents/land.config.json` and `.agents/orchestrate.config.json`.
 
@@ -42,8 +42,8 @@ submodule bump, so treat each one as a change to all of them.
 - `scripts/pr-land.js`, `scripts/decide.js`: the landing loop (run as `pnpm pr:land` in consumers).
 - `scripts/plans-map.js`: the plans map generator and block validator (agent-plans v2 spec).
 - `scripts/agent-env.sh`, `scripts/lib/agent-slots.sh`: per-worktree slot allocation.
-- `scripts/agent-capacity.js`, `scripts/agent-dispatch.sh`, `scripts/pr-land-bg.sh`: admit,
-  launch and land a worker.
+- `scripts/agent-capacity.js`, `scripts/agent-dispatch.sh`, `scripts/pr-land-bg.sh`,
+  `scripts/agent-reap.sh`: admit, launch, land and reap a worker.
 - `scripts/ideas-review-order.js`: `review-ideas`' queue.
 - `scripts/enhance-measure.js`: `enhance-repo`'s evidence — churn, fixes, co-change, backlog, size.
 - `scripts/agent-auto-mode.js`: installs a repo's `.agents/auto-mode.json` classifier policy.
