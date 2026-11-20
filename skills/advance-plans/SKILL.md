@@ -38,6 +38,7 @@ Started some other way? Ask once for `/rename <project>-build` and the `/config`
 
 - an open PR touches the plan's paths or names its slug — skip a **draft with no push in 7+ days**: it is parked, not live; list it in the message so the user can close it;
 - a worktree (`git worktree list`) whose branch has commits or uncommitted changes against `origin/<base>` touching those paths — `git -C <wt> diff --name-only origin/<base>...HEAD` plus `git -C <wt> status --porcelain`; an unpushed branch counts, and so does a plan file that exists only on that branch;
+- a **live interactive session** pushing to `<base>` directly — commits on `origin/<base>` in the last few hours that touch the plan's paths, from no batch you know of. Every session commits as the same human, so ask the sessions `ListAgents` shows before you dispatch into those files, and cut the worker into a worktree either way;
 - a worker of a **live** leader — a `~/.claude/orchestrator/*/batch.json` whose non-terminal worker still has a tmux window (`tmux list-windows -a -F '#S:#W'`) or a session in `ListAgents`. A state file alone proves nothing: old ones keep non-terminal workers for months.
 
 **Read the blocks on `origin/<base>`** (`git fetch origin <base>`, then `git show origin/<base>:<plan>`), never the main checkout. The committed map lags them until CI regenerates it; use it only for what it derives — `Advanced` and ⚠️ — and never regenerate it locally.
@@ -72,7 +73,7 @@ Every correction from triage goes out as **one** Direct docs commit to `<base>` 
 - A vague soak ("days", "a while") → a dated or observable trigger when the plan's own reasoning supports one; otherwise `decision:<the question>`.
 - `not now` gates, `human-only` gates and `misfiled` moves join the same commit; fold in the first dispatches' moves (§3) when they happen in the same minute.
 
-Write it from a detached docs worktree at `origin/<base>` named for you (`<wt-dir>/<your session name>-docs`; another leader may hold any shared name), never the main checkout. `node scripts/plans-map.js --validate; V=$?` before every push — never through a pipe — and never commit a regenerated map.
+Write it from a detached docs worktree at `origin/<base>` named for you (`<wt-dir>/<your session name>-docs`; another leader may hold any shared name), never the main checkout. Run `git submodule update --init` in it after every checkout: the validator is a symlink into the submodule, so without it the validator is missing, and the failure looks like a broken plan. `node scripts/plans-map.js --validate; V=$?` before every push — never through a pipe — and never commit a regenerated map.
 
 ## 3. Dispatch by capacity, then one message
 

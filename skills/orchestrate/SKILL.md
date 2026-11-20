@@ -263,7 +263,15 @@ Example entry:
 
 **Silence**: check the worker's window (`tmux capture-pane -pt <project>-fleet:<name>`) and `ListAgents` before assuming failure. A worker that exited leaves a live window with its last output; a worker that is alive but stuck is a different problem. If it died (crash, quota, a machine restart that took the tmux server), `pnpm agent:dispatch --resume <name>` — the worktree is warm and its transcript carries its context. A worker that was mid-`pr:land` lost its lander too: tell it to relaunch one.
 
-**A worker lands**: mark `landed`, then `pnpm agent:capacity` and dispatch the next queued item if it admits.
+**A worker lands**: mark `landed`, reap it with `scripts/agent-reap.sh <name>` (Phase 4), then `pnpm agent:capacity` and dispatch the next queued item if it admits.
+
+**A cause is proven from the failing attempt's own evidence, never from what the build contains.** On 2026-11-20 a worker blamed two e2e failures on App Check because that build still had it; asked to show the signature (the transport error, the backend timeout, the banner) on those exact attempts, it found none and withdrew it. When a worker attributes a failure, ask for the log lines or the trace from that attempt; an attribution without them is a hypothesis, and the leader records it as one.
+
+**Intermittent failures: get the hit rate before spending runs.** Give every diagnostic worker an explicit budget of CI runs (and branch prefix, deleted when done) in its prompt. Before a run meant to catch an intermittent failure, have the worker count the per-attempt hit rate across every run so far; at 30% a single run comes back green 70% of the time and proves nothing, while one dispatch repeating the flow on every shard can make a hit likely. The same rate decides what a soak can show: when the bug appeared in 1 of 4 runs before the fix, three clean runs after it would also happen with no fix about 42% of the time. Retire such a fix on a test that reproduces the bug, and let the runs show only that nothing regressed.
+
+**A worker that finds a bug outside its files reports it; the leader routes it.** Diagnostic work surfaces neighbours: a crash, a write loop, a stale test. Don't widen the worker's scope. Verify the finding is approved work (a crash is a defect fix), file it as a plan, check nobody else is editing those files (below), and dispatch a separate worker. Its plan's gate can then name the first worker's runs as its soak.
+
+**Don't name who owns a commit on `<base>` from its author line.** Every session commits as the same human. When `<base>` goes red under the batch, quote the commit and the failing check to the sessions that might own it, and ask; on 2026-11-20 the leader named the wrong session. Never fold someone else's fix into a worker's PR without that owner's word.
 
 Never relay a worker's message as if it were a user decision.
 
@@ -272,7 +280,7 @@ Never relay a worker's message as if it were a user decision.
 When all workers are terminal:
 
 1. Final `batch.json` update (statuses, PR numbers, merge evidence).
-2. **Reap**, per worker: `git -C <worktree> status --porcelain` is empty and `git merge-base --is-ancestor <worktree HEAD> origin/<base>` holds — then free its slot (`(cd <worktree> && source scripts/agent-env.sh --clean)`), `rm -rf` the directory, `git worktree prune`, and `git branch -d <branch>` (it refuses an unmerged branch; let it). Never `git worktree remove --force`: git refuses a plain `remove` on any worktree in a repo with a submodule, which is exactly what tempts `--force` past a tree the two checks above would have caught. A worktree that fails either check is reported, not reaped. This is the leader's job precisely because workers are banned from it, and the ban stays absolute, since a carve-out is indistinguishable in a prompt from the destructive uses it exists to prevent.
+2. **Reap**, per worker, with `scripts/agent-reap.sh <name>` (`--dry-run` to preview). It does exactly the following, and refuses with exit `2` when either check fails. Never type these steps by hand: the leader of the 2026-11-20 batch did, and reached for `--force` every time. `git -C <worktree> status --porcelain` is empty and `git merge-base --is-ancestor <worktree HEAD> origin/<base>` holds — then free its slot (`(cd <worktree> && source scripts/agent-env.sh --clean)`), `rm -rf` the directory, `git worktree prune`, and `git branch -d <branch>` (it refuses an unmerged branch; let it). Never `git worktree remove --force`: git refuses a plain `remove` on any worktree in a repo with a submodule, which is exactly what tempts `--force` past a tree the two checks above would have caught. A worktree that fails either check is reported, not reaped. This is the leader's job precisely because workers are banned from it, and the ban stays absolute, since a carve-out is indistinguishable in a prompt from the destructive uses it exists to prevent.
 3. **Write the learnings down** where a future agent will find them — `docs/plans/` or `docs/{decisions,ops}/`, not `batch.json`, not the chat.
 4. One summary to the user: landed PRs, anything aborted or failed and why, leftovers that belong back in `docs/plans/`.
 
@@ -290,6 +298,8 @@ Leave `batch.json` in place — it is the recovery record until the next batch.
 - **Merging on a worker's word that it has stopped.** Check its worktree is clean first; a worker can be three rounds past its last report.
 - **Picking a worker count** — any number, the user's or yours. `pnpm agent:capacity` admits one at a time.
 - **Hand-rolling the dispatch recipe** — `pnpm agent:dispatch`; fix the script when it falls short.
+- **Hand-rolling a reap** — `scripts/agent-reap.sh`; `git worktree remove --force` skips the very checks a reap needs.
+- **Accepting an attribution without the failing attempt's evidence** — "the build had X" is not "X caused it".
 
 ## A note on running two leaders
 
