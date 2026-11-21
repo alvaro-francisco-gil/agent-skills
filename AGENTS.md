@@ -15,6 +15,9 @@ its skills and scripts into place; some vendor a copy of
 `pr-land.js` and `decide.js` instead. A change here reaches every consumer on its next
 submodule bump, so treat each one as a change to all of them.
 
+A `base/` section reaches every repo that carries its markers on the owner's next sync,
+and is loaded into every session there. Keep each one short and free of project facts.
+
 ## Rules
 
 - **Procedure only.** Every project fact (Direct paths, hard-stop list, base branch,
@@ -49,6 +52,8 @@ submodule bump, so treat each one as a change to all of them.
 - `scripts/agent-auto-mode.js`: installs a repo's `.agents/auto-mode.json` classifier policy.
 - `hooks/guard-lander-kill.sh`: `PreToolUse` guard against pattern-wide lander kills.
 - `templates/plans-map.yml`: the workflow consumers copy.
+- `base/*.md`: the guidance several repos' `AGENTS.md` share, one section per file. A repo
+  carries a copy between `<!-- base:NAME -->` markers; the rules are in `base/README.md`.
 - `scripts/__tests__/*.test.mjs`: tests.
 - `.claude-plugin/plugin.json`: plugin manifest, though this repo is no longer a plugin
   marketplace and its description still mentions the plans lifecycle.

@@ -1,0 +1,2 @@
+- Don't add comments that restate what the code does. No "added for X" / "used by Y" notes.
+- Don't keep dead code "just in case" or mark it `// TODO unused`. Delete it; git remembers.

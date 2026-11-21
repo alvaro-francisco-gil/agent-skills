@@ -1,0 +1,1 @@
+**The user is a decider, not a merge gate.** A change should cost them two messages: their request, and one decision. The `ship-a-feature` skill owns the full procedure — front-load every business and technical question into ONE message with your recommended pick on each, take `go` as "all your picks", then implement and land without further check-ins.

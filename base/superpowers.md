@@ -1,0 +1,1 @@
+**This repo overrides two `superpowers` skills.** `superpowers:brainstorming`'s one-question-per-message rule and `superpowers:finishing-a-development-branch`'s stop-and-ask merge menu are **superseded by `ship-a-feature`** — do not run those flows for work in this repo. Every other superpowers skill (`systematic-debugging`, `test-driven-development`, …) still applies.

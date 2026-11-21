@@ -1,0 +1,2 @@
+- Don't bypass hooks (`--no-verify`) or amend commits unless asked.
+- Don't leave half-finished states. If a change can't land cleanly in this session, revert it — a repo in a transitional shape confuses every future agent.

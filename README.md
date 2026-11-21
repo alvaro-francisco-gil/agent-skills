@@ -38,6 +38,13 @@ multiple projects as a git submodule so a single copy is the source of truth.
   `## Enhance` section in its `AGENTS.md`. Plans only; feeds `review-ideas` and
   `advance-plans`.
 
+**Base sections**
+
+- **base/** — the agent guidance several repos share word for word (repo health, the
+  don'ts, be proactive, the autonomy opening), one section per file. A repo copies a section
+  into its `AGENTS.md` between `<!-- base:NAME -->` markers, so its clone alone carries the
+  text. See [`base/README.md`](base/README.md).
+
 **Scripts**
 
 - **scripts/pr-land.js** — the landing state machine behind `pnpm pr:land`. Shared verbatim;
