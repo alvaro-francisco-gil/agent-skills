@@ -108,6 +108,8 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   let db = null, me = null, canAnswer = false;
   let cards = [], answers = {}, current = null, shownAt = 0, openedCtx = false, toastTimer = null;
+  // High-stakes cards ask for your answer before showing the pick: id -> the option chosen blind.
+  const blindFirst = {};
 
   // SVG visuals come from the card data; keep shapes and text only.
   function safeSvg(src){
@@ -153,7 +155,8 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
   }
 
   function cardView(c){
-    const swipe = c.mode === "swipe" && c.reversible !== false;
+    const blind = c.stakes === "high" && !blindFirst[c.id];
+    const swipe = c.mode === "swipe" && c.reversible !== false && c.stakes !== "high";
     const card = el("article","card"); card.setAttribute("aria-label", c.question || "Decision");
     const meta = el("div","meta");
     meta.append(el("span","src", c.source || ""));
@@ -164,14 +167,15 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
     if (c.visual){ const svg = safeSvg(c.visual); if (svg){ const v = el("div","visual"); v.append(svg); card.append(v); } }
     const opts = el("ul","opts");
     (c.options || []).forEach(o => {
-      const li = el("li","opt" + (o.id === c.pick ? " pick" : ""));
-      if (o.id === c.pick) li.append(el("span","mypick","My pick"));
+      const li = el("li","opt" + (!blind && o.id === c.pick ? " pick" : ""));
+      if (!blind && o.id === c.pick) li.append(el("span","mypick","My pick"));
       li.append(el("span","lab", o.label || ""));
       if (o.why) li.append(el("span","why", o.why));
       opts.append(li);
     });
     card.append(opts);
-    if (c.with_yes || c.with_no){
+    if (blind) card.append(el("p","muted","This one matters more, so choose first. I show my pick after."));
+    if (!blind && (c.with_yes || c.with_no)){
       const yn = el("div","yesno");
       if (c.with_yes){ const d = el("div"); d.append(el("b",null,"With my pick")); d.append(document.createTextNode(c.with_yes)); yn.append(d); }
       if (c.with_no){ const d = el("div"); d.append(el("b",null,"Without it")); d.append(document.createTextNode(c.with_no)); yn.append(d); }
@@ -197,6 +201,20 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
     const answer = el("div","answer");
     if (!canAnswer){
       answer.append(el("p","muted","Only the person this deck is for can answer it."));
+    } else if (blind){
+      (c.options||[]).forEach(o => { const b = el("button",null,o.action || o.label); b.type = "button";
+        b.onclick = () => { if (o.id === c.pick){ choose(c, o, "button", "", {blind_choice:o.id, agreed_blind:true}); } else { blindFirst[c.id] = o; render(); } };
+        answer.append(b); });
+      const other = el("button","quiet","Something else…"); other.type = "button"; other.onclick = () => showNote(answer, c, "button");
+      answer.append(other);
+    } else if (blindFirst[c.id]){
+      const mine = blindFirst[c.id];
+      answer.append(el("p",null,"You chose «" + (mine.action || mine.label) + "». My pick is marked above."));
+      const keep = el("button","primary","Keep mine: " + (mine.action || mine.label)); keep.type = "button";
+      keep.onclick = () => choose(c, mine, "button", "", {blind_choice:mine.id, agreed_blind:false});
+      const sw = el("button",null,"Switch to yours: " + (pickOpt ? (pickOpt.action || pickOpt.label) : "")); sw.type = "button";
+      sw.onclick = () => choose(c, pickOpt, "button", "", {blind_choice:mine.id, agreed_blind:false});
+      answer.append(keep, sw);
     } else if (swipe){
       const hint = el("div","hint");
       const l = el("button",null,"← Other options"); l.type = "button"; l.onclick = () => showOthers(answer, c, others, "button");
@@ -265,15 +283,16 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
     card.addEventListener("pointerup", end); card.addEventListener("pointercancel", end);
   }
 
-  async function choose(c, opt, via, note){
+  async function choose(c, opt, via, note, extra){
     if (!opt || !db) return;
     const prev = answers[c.id] || {};
     const doc = {
       card: c.id, choice: opt.id, label: opt.label || "", followed_pick: opt.id === c.pick,
       ms: Math.round(performance.now() - shownAt), opened_context: openedCtx,
       mode: c.mode || "buttons", via, note: note || "", at: new Date().toISOString(),
-      active: true, taken_back: prev.taken_back || 0, by: me || ""
+      active: true, taken_back: prev.taken_back || 0, by: me || "", stakes: c.stakes || "normal"
     };
+    if (extra) Object.assign(doc, extra);
     answers[c.id] = doc; current = null; render();
     showToast("Saved: " + (opt.action || opt.label), c.id);
     try{ await db.collection("answers").doc(c.id).set(doc); }
@@ -319,7 +338,7 @@ textarea{font:inherit;width:100%;box-sizing:border-box;min-height:70px;border-ra
 
   document.addEventListener("keydown", (e) => {
     if (!current || !canAnswer || e.target.closest("textarea")) return;
-    const swipe = current.mode === "swipe" && current.reversible !== false;
+    const swipe = current.mode === "swipe" && current.reversible !== false && current.stakes !== "high";
     if (!swipe) return;
     const pickOpt = (current.options||[]).find(o => o.id === current.pick);
     if (e.key === "ArrowRight"){ e.preventDefault(); choose(current, pickOpt, "key"); }
