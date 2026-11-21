@@ -112,7 +112,7 @@ Consumers point one level deeper than the repo root, into `skills/`.
 ### Add to a new repo
 
 ```sh
-git submodule add https://github.com/alvaro-francisco-gil/agent-skills.git .agents/_shared
+git submodule add https://github.com/ghostaff-ai/agent-skills.git .agents/_shared
 ln -s ../_shared/skills/ship-a-feature .agents/skills/ship-a-feature
 ln -s ../.agents/_shared/scripts/pr-land.js scripts/pr-land.js
 git add .gitmodules .agents/_shared .agents/skills scripts/pr-land.js
