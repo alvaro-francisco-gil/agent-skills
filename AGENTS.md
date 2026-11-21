@@ -42,6 +42,7 @@ and is loaded into every session there. Keep each one short and free of project 
 - `skills/advance-plans/SKILL.md`: builds the approved pool on top of `orchestrate`.
 - `skills/review-ideas/SKILL.md`: verifies `ideas/` against the code and asks for yeses.
 - `skills/enhance-repo/SKILL.md`: files evidence-backed enhancement plans into `ideas/`.
+- `skills/decision-deck/SKILL.md`: brings decisions to the human as a claude.ai deck of cards (`page.html`, `example-card.json`) and reads the answers back.
 - `scripts/pr-land.js`, `scripts/decide.js`: the landing loop (run as `pnpm pr:land` in consumers).
 - `scripts/plans-map.js`: the plans map generator and block validator (agent-plans v2 spec).
 - `scripts/agent-env.sh`, `scripts/lib/agent-slots.sh`: per-worktree slot allocation.
